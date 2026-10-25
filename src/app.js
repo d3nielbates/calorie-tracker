@@ -6,7 +6,7 @@ import { computeTargets, assessIntake, ACTIVITY_LEVELS, LOSS_RATES, SAFETY } fro
 import { MEALS } from './meals.js';
 import { planWeek, alternativesForSlot, replaceMeal, shoppingList, SLOTS, SLOT_LABELS, DIETS, EXCLUSIONS } from './planner.js';
 import { searchFoods, buildIndex } from './search.js';
-import { buildSearchUrl, buildProductUrl, normaliseSearchResponse, normaliseProductResponse, UK_STORES, isValidBarcode } from './importers/off.js';
+import { buildSearchUrl, buildModernSearchUrl, normaliseModernSearchResponse, buildProductUrl, normaliseSearchResponse, normaliseProductResponse, UK_STORES, isValidBarcode } from './importers/off.js';
 import { unpackDatabase, mergeFoods } from './fooddb.js';
 import { progressSummary } from './trend.js';
 import {
@@ -254,13 +254,13 @@ async function fetchJson(url, timeoutMs = 15000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } });
+    const res = await fetch(url, { signal: ctrl.signal });
     if (res.status === 429) throw new Error('Open Food Facts is limiting searches right now. Wait a minute and try again.');
     if (!res.ok) throw new Error(`Open Food Facts returned an error (${res.status})`);
     return await res.json();
   } catch (e) {
     if (e.name === 'AbortError') throw new Error('The product search timed out. Check your connection and try again.');
-    if (e instanceof TypeError) throw new Error("Couldn't reach Open Food Facts. Are you online?");
+    if (e instanceof TypeError) throw new Error("Couldn't connect to Open Food Facts. Their service may be busy; try again in a minute. You can also type a barcode or add the food from its label.");
     throw e;
   } finally {
     clearTimeout(timer);
@@ -299,13 +299,23 @@ async function runSearch(form) {
   msg.textContent = 'Searching UK products…';
   out.innerHTML = '';
   try {
-    const { foods: list, total } = normaliseSearchResponse(await fetchJson(buildSearchUrl({ query: q, storeTag: form.elements.store.value })));
+    const { foods: list, total } = await searchProducts(q, form.elements.store.value);
     addResults = list;
     msg.textContent = list.length ? `Showing ${list.length} of ${total.toLocaleString('en-GB')} products. Always check against the pack.` : '';
     out.innerHTML = resultsHtml(list, 'No UK products found with nutrition data. Try fewer words, another shop, or a barcode.');
   } catch (e) {
     msg.textContent = e.message;
   }
+}
+
+// Try Open Food Facts' newer search service first, then the older one, so a
+// problem with either still leaves product search working.
+async function searchProducts(query, storeTag) {
+  try {
+    const r = normaliseModernSearchResponse(await fetchJson(buildModernSearchUrl({ query, storeTag }), 10000));
+    if (r.foods.length) return r;
+  } catch { /* fall back */ }
+  return normaliseSearchResponse(await fetchJson(buildSearchUrl({ query, storeTag })));
 }
 
 let scanStream = null;

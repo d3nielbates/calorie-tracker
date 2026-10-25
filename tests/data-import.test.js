@@ -5,7 +5,7 @@ import { gzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { splitCaretLine, abbrevRowToNutrients, parseSR28, blendNutrients, packNutrients, unpackNutrients, EXCLUDED_GROUPS } from '../src/importers/sr28.js';
-import { normaliseOffProduct, normaliseSearchResponse, normaliseProductResponse, parseQuantityGrams, isValidBarcode, buildSearchUrl, buildProductUrl } from '../src/importers/off.js';
+import { buildModernSearchUrl, normaliseModernSearchResponse, normaliseOffProduct, normaliseSearchResponse, normaliseProductResponse, parseQuantityGrams, isValidBarcode, buildSearchUrl, buildProductUrl } from '../src/importers/off.js';
 import { createOffCsvFilter, isUkRow } from '../src/importers/off-csv.js';
 import { importOffCsv } from '../scripts/import-off-uk.mjs';
 import { buildFoods } from '../scripts/build-foods.mjs';
@@ -263,4 +263,22 @@ test('OFF import script reads a gzipped export end to end', async () => {
 test('unpackDatabase rejects mismatched files', () => {
   assert.throws(() => unpackDatabase(null), /missing/);
   assert.throws(() => unpackDatabase({ foods: [], nutrientKeys: ['kcal'] }), /different app version/);
+});
+
+test('newer OFF search service: URL and response handling', () => {
+  const u = new URL(buildModernSearchUrl({ query: 'greek "yogurt"', storeTag: 'tesco' }));
+  assert.equal(u.origin, 'https://search.openfoodfacts.org');
+  assert.equal(u.searchParams.get('q'), 'greek  yogurt  countries_tags:"en:united-kingdom" stores_tags:"tesco"');
+  const r = normaliseModernSearchResponse({
+    count: 2,
+    hits: [
+      { code: '5000119000000', product_name: 'Classic Houmous', brands: ['Tesco'], stores: ['Tesco', 'Asda'], serving_quantity: 30, nutriments: { 'energy-kcal_100g': 327, proteins_100g: 7.1, carbohydrates_100g: 7.6, fat_100g: 29.5, fiber_100g: 5.4 } },
+      { code: '1', product_name: 'No data', nutriments: {} },
+    ],
+  });
+  assert.equal(r.total, 2);
+  assert.equal(r.foods.length, 1);
+  assert.equal(r.foods[0].brand, 'Tesco');
+  assert.equal(r.foods[0].stores, 'Tesco, Asda');
+  assert.throws(() => normaliseModernSearchResponse({ error: 'x' }), /Unexpected/);
 });

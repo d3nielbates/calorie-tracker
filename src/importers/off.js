@@ -49,6 +49,24 @@ export function buildSearchUrl({ query, storeTag, page = 1, pageSize = 24 }) {
   return `${OFF_BASE}/cgi/search.pl?${p}`;
 }
 
+// Open Food Facts' newer search service (search-a-licious). Tried first; the
+// legacy search above is the fallback.
+export const OFF_SEARCH_BASE = 'https://search.openfoodfacts.org';
+
+export function buildModernSearchUrl({ query, storeTag, page = 1, pageSize = 24 }) {
+  const terms = query.trim().replace(/["\\]/g, ' ');
+  let q = `${terms} countries_tags:"en:united-kingdom"`;
+  if (storeTag) q += ` stores_tags:"${storeTag}"`;
+  const p = new URLSearchParams({
+    q,
+    page: String(page),
+    page_size: String(pageSize),
+    fields: OFF_FIELDS.join(','),
+    langs: 'en',
+  });
+  return `${OFF_SEARCH_BASE}/search?${p}`;
+}
+
 export function buildProductUrl(barcode) {
   const code = String(barcode).replace(/\D/g, '');
   if (code.length < 6 || code.length > 14) throw new Error('A barcode should have 6 to 14 digits');
@@ -111,8 +129,9 @@ const pick = (nm, keys) => {
  */
 export function normaliseOffProduct(p) {
   if (!p || typeof p !== 'object') return null;
+  const text = (v) => (Array.isArray(v) ? v.join(', ') : v && typeof v === 'object' ? Object.values(v)[0] ?? '' : v ?? '');
   const code = String(p.code ?? '').trim();
-  const name = String(p.product_name_en || p.product_name || '').trim();
+  const name = String(text(p.product_name_en) || text(p.product_name) || '').trim();
   if (!code || !name) return null;
   const nm = p.nutriments || {};
   const warnings = [];
@@ -172,8 +191,8 @@ export function normaliseOffProduct(p) {
     id: `off:${code}`,
     code,
     name,
-    brand: String(p.brands ?? '').split(',')[0].trim(),
-    stores: String(p.stores ?? '').trim(),
+    brand: String(text(p.brands)).split(',')[0].trim(),
+    stores: String(text(p.stores)).trim(),
     cat: 'UK product',
     src: 'off',
     image: p.image_front_small_url || null,
@@ -214,6 +233,13 @@ export function normaliseSearchResponse(json) {
     }
   }
   return { foods: out, total: Number(json?.count) || out.length };
+}
+
+/** Normalise a response from the newer search service (products under `hits`). */
+export function normaliseModernSearchResponse(json) {
+  if (!json || !Array.isArray(json.hits)) throw new Error('Unexpected response from Open Food Facts search');
+  const { foods } = normaliseSearchResponse({ products: json.hits });
+  return { foods, total: Number(json.count) || foods.length };
 }
 
 /** Normalise a single-product response from /api/v2/product. */

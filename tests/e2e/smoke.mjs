@@ -23,10 +23,12 @@ const page = await context.newPage();
 page.setDefaultTimeout(5000);
 const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
-page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+page.on('console', (m) => { if (m.type() === 'error' && !m.text().includes('net::ERR_FAILED')) errors.push(m.text()); }); // ERR_FAILED: the deliberately failed search request
 page.on('dialog', (d) => d.accept());
 let offCalls = 0;
 await page.route('https://images.openfoodfacts.org/**', (route) => route.fulfill({ status: 200, contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>' }));
+// The newer search service is made to fail so the fallback path is exercised.
+await page.route('https://search.openfoodfacts.org/**', (route) => route.abort('failed'));
 await page.route('https://world.openfoodfacts.org/**', (route) => {
   offCalls += 1;
   const url = route.request().url();
