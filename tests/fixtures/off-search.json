@@ -1,0 +1,55 @@
+{
+  "count": 3,
+  "page": 1,
+  "page_size": 24,
+  "products": [
+    {
+      "code": "5000119000000",
+      "product_name": "Classic Houmous",
+      "brands": "Tesco",
+      "stores": "Tesco",
+      "quantity": "200 g",
+      "serving_size": "30 g",
+      "serving_quantity": 30,
+      "countries_tags": ["en:united-kingdom"],
+      "image_front_small_url": "https://images.openfoodfacts.org/images/products/500/011/900/0000/front_en.3.200.jpg",
+      "nutriments": {
+        "energy-kj_100g": 1355,
+        "energy-kcal_100g": 327,
+        "fat_100g": 29.5,
+        "saturated-fat_100g": 2.4,
+        "carbohydrates_100g": 7.6,
+        "sugars_100g": 0.5,
+        "fiber_100g": 5.4,
+        "proteins_100g": 7.1,
+        "salt_100g": 0.83
+      }
+    },
+    {
+      "code": "0000000000001",
+      "product_name": "Reduced Fat Houmous",
+      "brands": "Sainsbury's",
+      "stores": "Sainsbury's",
+      "quantity": "4 x 50g",
+      "countries_tags": ["en:united-kingdom"],
+      "nutriments": {
+        "energy_100g": 950,
+        "fat_100g": 17,
+        "saturated-fat_100g": 1.5,
+        "carbohydrates_100g": 9,
+        "sugars_100g": 0.6,
+        "fiber_100g": 6,
+        "proteins_100g": 7,
+        "sodium_100g": 0.3,
+        "iron_100g": 0.0021
+      }
+    },
+    {
+      "code": "0000000000002",
+      "product_name": "Houmous with no nutrition data",
+      "brands": "Somebrand",
+      "countries_tags": ["en:united-kingdom"],
+      "nutriments": {}
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"name":"calorie-tracker","version":"1.0.0","private":true,"type":"module","scripts":{"build:foods":"node scripts/build-foods.mjs","test":"node --test \"tests/*.test.js\"","test:e2e":"node tests/e2e/smoke.mjs && node tests/e2e/artifact-mode.mjs","start":"node scripts/serve.mjs"}}

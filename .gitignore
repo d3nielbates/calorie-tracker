@@ -1,0 +1,4 @@
+node_modules/
+screenshots/
+data/off-uk.json
+*.csv.gz

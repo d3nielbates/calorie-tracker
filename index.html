@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Calorie Tracker</title>
+  <meta name="description" content="Track calories, nutrients and weight loss, with UK targets and a weekly meal planner.">
+  <meta name="theme-color" content="#1f7a5a">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Calorie Tracker</h1>
+    <span id="status" class="status" role="status" aria-live="polite"></span>
+  </header>
+  <main id="view" tabindex="-1">
+    <p class="loading">Loading food database…</p>
+  </main>
+  <nav class="tabs" aria-label="Sections">
+    <a href="#today" data-tab="today">Today</a>
+    <a href="#plan" data-tab="plan">Meal plan</a>
+    <a href="#progress" data-tab="progress">Progress</a>
+    <a href="#profile" data-tab="profile">Profile</a>
+  </nav>
+  <dialog id="sheet" aria-labelledby="sheet-title">
+    <div class="sheet-head">
+      <h2 id="sheet-title"></h2>
+      <button type="button" class="icon-btn" data-action="close-sheet" aria-label="Close">✕</button>
+    </div>
+    <div id="sheet-body"></div>
+  </dialog>
+  <div id="toast" class="toast" role="alert" hidden></div>
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>

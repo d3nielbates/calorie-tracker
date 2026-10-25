@@ -1,0 +1,27 @@
+<title>Daniel's Calorie Tracker</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="Track calories, nutrients and weight loss, with UK targets and a weekly meal planner.">
+<link rel="stylesheet" href="styles.css">
+
+  <header class="topbar">
+    <h1>Calorie Tracker</h1>
+    <span id="status" class="status" role="status" aria-live="polite"></span>
+  </header>
+  <main id="view" tabindex="-1">
+    <p class="loading">Loading food database…</p>
+  </main>
+  <nav class="tabs" aria-label="Sections">
+    <a href="#today" data-tab="today">Today</a>
+    <a href="#plan" data-tab="plan">Meal plan</a>
+    <a href="#progress" data-tab="progress">Progress</a>
+    <a href="#profile" data-tab="profile">Profile</a>
+  </nav>
+  <dialog id="sheet" aria-labelledby="sheet-title">
+    <div class="sheet-head">
+      <h2 id="sheet-title"></h2>
+      <button type="button" class="icon-btn" data-action="close-sheet" aria-label="Close">✕</button>
+    </div>
+    <div id="sheet-body"></div>
+  </dialog>
+  <div id="toast" class="toast" role="alert" hidden></div>
+  <script type="module" src="src/app.js"></script>
