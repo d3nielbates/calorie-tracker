@@ -4,7 +4,7 @@
 // (supermarket products you've used) and one document per diary day. Each
 // document carries a timestamp; on load the newer copy of each one wins.
 
-export const CORE_KEYS = ['version', 'acceptedDisclaimer', 'profile', 'settings', 'weights', 'customFoods', 'recentFoods', 'plan', 'planOptions'];
+export const CORE_KEYS = ['version', 'acceptedDisclaimer', 'profile', 'settings', 'weights', 'customFoods', 'recentFoods', 'plan', 'planOptions', 'priceOverrides'];
 export const DAY_PREFIX = 'd-';
 export const RECENT_DAYS = 400; // diary days loaded at start; older days load when opened
 

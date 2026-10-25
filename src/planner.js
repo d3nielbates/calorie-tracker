@@ -5,6 +5,10 @@
 // best. The score penalises: calories off target, protein and fibre below
 // target, saturated fat/salt/sugars above UK limits, micronutrients below the
 // UK RNI, and repeating meals. Results are deterministic for a given seed.
+//
+// To stay fast with a large meal library, each day searches a shortlist per
+// slot: the meals that best fit the targets on their own plus a random few.
+// Meal prep fixes breakfast and/or lunch (same meal, same portion) all week.
 
 import { NUTRIENT_KEYS, MICRO_KEYS } from './nutrients.js';
 
@@ -13,6 +17,8 @@ export const SLOT_LABELS = { breakfast: 'Breakfast', lunch: 'Lunch', dinner: 'Di
 export const SLOT_SHARES = { breakfast: 0.25, lunch: 0.3, dinner: 0.35, snack: 0.1 };
 const SCALE_LIMITS = { breakfast: [0.6, 2.0], lunch: [0.6, 2.0], dinner: [0.6, 2.0], snack: [0.5, 2.5] };
 const MAX_USES = { breakfast: 3, lunch: 2, dinner: 2, snack: 3 };
+const SHORTLIST = { best: 9, random: 5 }; // candidates searched per slot per day
+export const PREP_SLOTS = ['breakfast', 'lunch'];
 
 export const DIETS = {
   omnivore: { label: 'No restrictions', excludeTags: [] },
@@ -67,8 +73,19 @@ export function excludedTags({ diet = 'omnivore', exclude = [] } = {}) {
   return tags;
 }
 
+/** Ingredients (food ids with the "uk:" prefix) used anywhere in the meal library. */
+export function mealIngredients(meals) {
+  const ids = new Set();
+  for (const m of meals) for (const [id] of m.items) ids.add(foodKey(id));
+  return ids;
+}
+
 export function mealAllowed(meal, foods, options = {}) {
   if (options.dislikedMeals?.includes(meal.id)) return false;
+  if (options.dislikedFoods?.length) {
+    const no = new Set(options.dislikedFoods.map(foodKey));
+    if (meal.items.some(([id]) => no.has(foodKey(id)))) return false;
+  }
   const banned = excludedTags(options);
   for (const t of mealTags(meal, foods)) if (banned.has(t)) return false;
   return true;
@@ -164,6 +181,7 @@ export function dayTotals(meals) {
 /** Prepare candidates per slot: allowed meals with base nutrients and slot scale. */
 export function prepareCandidates({ targets, foods, meals, options = {} }) {
   const bySlot = {};
+  const score = makeScorer(targets);
   for (const slot of SLOTS) {
     const slotKcal = targets.kcal * SLOT_SHARES[slot];
     const [lo, hi] = SCALE_LIMITS[slot];
@@ -173,22 +191,45 @@ export function prepareCandidates({ targets, foods, meals, options = {} }) {
         const base = itemsNutrients(m.items, foods);
         const scale = clamp(slotKcal / base.kcal, lo, hi);
         const vec = addVec(zeroVec(), base, scale);
-        return { meal: m, base, scale, vec };
+        // How well this meal fits the targets on its own (as if the whole day
+        // looked like it): used to shortlist candidates for the search.
+        const solo = score(toArr(vec), 1 / SLOT_SHARES[slot]);
+        return { meal: m, base, scale, vec, solo };
       });
   }
   return bySlot;
 }
 
+function shortlist(opts, used, prevDay, random, noise) {
+  if (opts.length <= SHORTLIST.best + SHORTLIST.random) return opts;
+  const ranked = opts
+    .map((c) => ({ c, s: c.solo + (used.get(c.meal.id) ?? 0) * 2 + (prevDay?.has(c.meal.id) ? 4 : 0) + random() * noise * 4 }))
+    .sort((a, b) => a.s - b.s)
+    .map((x) => x.c);
+  const out = ranked.slice(0, SHORTLIST.best);
+  const rest = ranked.slice(SHORTLIST.best);
+  for (let i = 0; i < SHORTLIST.random && rest.length; i++) out.push(...rest.splice(Math.floor(random() * rest.length), 1));
+  return out;
+}
+
 function bestCombos({ bySlot, targets, used, prevDay, random, noise, fixed = {}, limit = 1 }) {
-  const slotOpts = SLOTS.map((slot) => (fixed[slot] ? [fixed[slot]] : bySlot[slot].filter((c) => (used.get(c.meal.id) ?? 0) < MAX_USES[slot])));
+  const slotOpts = SLOTS.map((slot) => (fixed[slot]
+    ? [fixed[slot]]
+    : shortlist(bySlot[slot].filter((c) => (used.get(c.meal.id) ?? 0) < MAX_USES[slot]), used, prevDay, random, noise)));
   if (slotOpts.some((o) => o.length === 0)) return [];
+  const isFixed = SLOTS.map((slot) => Boolean(fixed[slot]));
+  const fixedTot = new Float64Array(NK);
+  SLOTS.forEach((slot, l) => { if (isFixed[l]) toArr(fixed[slot].vec).forEach((v, k) => { fixedTot[k] += v; }); });
+  const mix = new Float64Array(NK);
   const score = makeScorer(targets);
   const arrs = slotOpts.map((opts) => opts.map((c) => toArr(c.vec)));
-  const pens = slotOpts.map((opts) => opts.map((c) => (used.get(c.meal.id) ?? 0) * 2 + (prevDay?.has(c.meal.id) ? 4 : 0)));
+  const pens = slotOpts.map((opts, l) => opts.map((c) => (isFixed[l] ? 0 : (used.get(c.meal.id) ?? 0) * 2 + (prevDay?.has(c.meal.id) ? 4 : 0))));
   const ids = slotOpts.map((opts) => opts.map((c) => c.meal.id));
   // How far each candidate's portion can still be scaled within its slot limits.
-  const rHi = slotOpts.map((opts, l) => opts.map((c) => SCALE_LIMITS[SLOTS[l]][1] / c.scale));
-  const rLo = slotOpts.map((opts, l) => opts.map((c) => SCALE_LIMITS[SLOTS[l]][0] / c.scale));
+  // Fixed (meal prep) portions never change, so they don't limit it.
+  const rHi = slotOpts.map((opts, l) => opts.map((c) => (isFixed[l] ? Infinity : SCALE_LIMITS[SLOTS[l]][1] / c.scale)));
+  const rLo = slotOpts.map((opts, l) => opts.map((c) => (isFixed[l] ? 0 : SCALE_LIMITS[SLOTS[l]][0] / c.scale)));
+  const anyFixed = isFixed.some(Boolean);
   const top = []; // sorted ascending by score, at most `limit` long
   const tot = new Float64Array(NK);
   const pick = [0, 0, 0, 0];
@@ -209,13 +250,27 @@ function bestCombos({ bySlot, targets, used, prevDay, random, noise, fixed = {},
       }
       // Uniform correction so the day lands on target, without pushing any
       // portion outside its slot's limits (so the score matches the real plan).
-      const r = clamp(targets.kcal / tot[kcalI], Math.max(0.85, loCap), Math.min(1.15, hiCap));
-      let s = score(tot, r) + pen;
+      let s;
+      let r;
+      if (anyFixed) {
+        // Only the flexible meals are scaled; fixed ones stay as they are.
+        r = clamp((targets.kcal - fixedTot[kcalI]) / tot[kcalI], Math.max(0.85, loCap), Math.min(1.15, hiCap));
+        for (let k = 0; k < NK; k++) mix[k] = fixedTot[k] + tot[k] * r;
+        s = score(mix, 1) + pen;
+      } else {
+        r = clamp(targets.kcal / tot[kcalI], Math.max(0.85, loCap), Math.min(1.15, hiCap));
+        s = score(tot, r) + pen;
+      }
       if (noise) s += random() * noise;
       consider(s, r);
       return;
     }
     const opts = arrs[level];
+    if (isFixed[level]) {
+      pick[level] = 0;
+      recurse(level + 1, pen + pens[level][0], hiCap, loCap);
+      return;
+    }
     for (let j = 0; j < opts.length; j++) {
       const v = opts[j];
       for (let k = 0; k < NK; k++) tot[k] += v[k];
@@ -228,12 +283,51 @@ function bestCombos({ bySlot, targets, used, prevDay, random, noise, fixed = {},
   return top.map((t) => ({ score: t.score, pick: t.idx.map((j, level) => slotOpts[level][j]), r: t.r }));
 }
 
-function materialise(combo, foods) {
+function materialise(combo, foods, fixed = {}) {
   return combo.pick.map((c, i) => {
     const slot = SLOTS[i];
+    if (fixed[slot]) return buildMeal(c.meal, slot, c.scale, foods);
     const [lo, hi] = SCALE_LIMITS[slot];
     return buildMeal(c.meal, slot, clamp(c.scale * combo.r, lo, hi), foods);
   });
+}
+
+/**
+ * Meal-prep choices for a slot, best first: each candidate is fixed for the
+ * day and the rest of the day is planned around it. Meals that keep in the
+ * fridge get a small bonus.
+ */
+export function rankPrepMeals({ targets, foods, meals, options = {}, slot, fixed = {}, limit = 8, bySlot }) {
+  bySlot ??= prepareCandidates({ targets, foods, meals, options });
+  const random = rng(options.seed ?? 1);
+  const taken = new Set(Object.values(fixed).map((c) => c.meal.id));
+  const ranked = [];
+  for (const c of bySlot[slot]) {
+    if (taken.has(c.meal.id)) continue;
+    const [best] = bestCombos({ bySlot, targets, used: new Map(), prevDay: null, random, noise: 0, fixed: { ...fixed, [slot]: c } });
+    if (!best) continue;
+    ranked.push({ cand: c, score: best.score - (c.meal.keeps >= 3 ? 1 : 0) });
+  }
+  ranked.sort((a, b) => a.score - b.score);
+  return ranked.slice(0, limit);
+}
+
+/** Resolve options.prep ({breakfast, lunch}: false | true/'auto' | meal id) to fixed candidates. */
+function resolvePrep({ targets, foods, meals, options, bySlot, random }) {
+  const fixed = {};
+  for (const slot of PREP_SLOTS) {
+    const want = options.prep?.[slot];
+    if (!want) continue;
+    if (typeof want === 'string' && want !== 'auto') {
+      const c = bySlot[slot].find((x) => x.meal.id === want);
+      if (c) { fixed[slot] = c; continue; }
+      // The chosen meal is no longer allowed (e.g. a new dislike): pick another.
+    }
+    const top = rankPrepMeals({ targets, foods, meals, options, slot, fixed, limit: 3, bySlot });
+    if (!top.length) continue;
+    fixed[slot] = top[Math.floor(random() * top.length)].cand;
+  }
+  return fixed;
 }
 
 /**
@@ -252,22 +346,24 @@ export function planWeek({ targets, foods, meals, options = {} }) {
   if (empty.length) {
     throw new Error(`No ${empty.join(' or ')} meals fit your diet and exclusions. Try removing an exclusion.`);
   }
+  const fixed = resolvePrep({ targets, foods, meals, options, bySlot, random });
   const used = new Map();
   const out = [];
   let prevDay = null;
   for (let d = 0; d < days; d++) {
-    let [best] = bestCombos({ bySlot, targets, used, prevDay, random, noise });
+    let [best] = bestCombos({ bySlot, targets, used, prevDay, random, noise, fixed });
     if (!best) {
       // Ran out of variety: allow repeats rather than fail.
       used.clear();
-      [best] = bestCombos({ bySlot, targets, used, prevDay, random, noise });
+      [best] = bestCombos({ bySlot, targets, used, prevDay, random, noise, fixed });
     }
-    const dayMeals = materialise(best, foods);
+    const dayMeals = materialise(best, foods, fixed);
     for (const m of dayMeals) used.set(m.mealId, (used.get(m.mealId) ?? 0) + 1);
     prevDay = new Set(dayMeals.map((m) => m.mealId));
     out.push({ meals: dayMeals, totals: dayTotals(dayMeals) });
   }
-  const plan = { createdWith: { seed, options: { ...options } }, days: out };
+  const prepMeals = Object.fromEntries(Object.entries(fixed).map(([slot, c]) => [slot, c.meal.id]));
+  const plan = { createdWith: { seed, options: { ...options } }, prepMeals, days: out };
   return { ...plan, ...summarisePlan(plan, targets) };
 }
 
@@ -339,4 +435,65 @@ export function shoppingList(plan, foods) {
   });
   rows.sort((a, b) => a.cat.localeCompare(b.cat) || a.name.localeCompare(b.name));
   return rows;
+}
+
+/**
+ * Replace planned meals that the options no longer allow (for example after
+ * a new dislike), keeping the rest of the plan. If a meal-prep meal is hit,
+ * the week is re-planned so prep portions stay the same every day.
+ * Returns { plan, changed, replanned }.
+ */
+export function cleanPlan({ plan, targets, foods, meals, options = {} }) {
+  const byId = new Map(meals.map((m) => [m.id, m]));
+  const bad = (m) => { const meal = byId.get(m.mealId); return !meal || !mealAllowed(meal, foods, options); };
+  const prepSlots = new Set(Object.keys(plan.prepMeals ?? {}));
+  let changed = 0;
+  for (const d of plan.days) for (const m of d.meals) if (bad(m)) changed++;
+  if (!changed) return { plan, changed: 0, replanned: false };
+  if (plan.days.some((d) => d.meals.some((m) => prepSlots.has(m.slot) && bad(m)))) {
+    const seed = plan.createdWith?.seed;
+    const next = planWeek({ targets, foods, meals, options: { ...options, ...(seed != null ? { seed } : {}), days: plan.days.length } });
+    return { plan: { ...next, startDate: plan.startDate }, changed, replanned: true };
+  }
+  let next = plan;
+  plan.days.forEach((d, dayIndex) => {
+    for (const m of d.meals) {
+      if (!bad(m)) continue;
+      const [alt] = alternativesForSlot({ plan: next, dayIndex, slot: m.slot, targets, foods, meals, options, limit: 1 });
+      if (!alt) throw new Error(`No other ${SLOT_LABELS[m.slot].toLowerCase()} fits these choices. Try removing a dislike.`);
+      next = replaceMeal(next, dayIndex, alt, targets);
+    }
+  });
+  return { plan: next, changed, replanned: false };
+}
+
+/**
+ * Batch-cooking guide for meal-prep slots: the portion, how many days, and
+ * batches no bigger than the meal keeps in the fridge. Meals that don't keep
+ * (or contain cooked rice, which should be eaten within a day) are made
+ * fresh each day from the same weekly shop.
+ */
+export function prepBatches(plan, meals) {
+  const byId = new Map(meals.map((m) => [m.id, m]));
+  return Object.entries(plan.prepMeals ?? {}).map(([slot, mealId]) => {
+    const days = [];
+    plan.days.forEach((d, i) => { const m = d.meals.find((x) => x.slot === slot && x.mealId === mealId); if (m) days.push({ i, m }); });
+    const portion = days[0]?.m;
+    const keeps = byId.get(mealId)?.keeps ?? 0;
+    const batches = [];
+    if (portion && keeps >= 2) {
+      const count = Math.ceil(days.length / keeps);
+      let start = 0;
+      for (let b = 0; b < count; b++) {
+        const size = Math.ceil((days.length - start) / (count - b));
+        batches.push({
+          startDay: days[start].i,
+          portions: size,
+          items: portion.items.map((it) => ({ ...it, grams: it.grams * size })),
+        });
+        start += size;
+      }
+    }
+    return { slot, mealId, name: portion?.name ?? mealId, method: portion?.method ?? '', portions: days.length, keeps, portion, batches };
+  });
 }

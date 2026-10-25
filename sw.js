@@ -1,11 +1,11 @@
 // Offline support: cache the app shell and food database; network-first for
 // the app files so updates arrive, cache fallback when offline. Open Food
 // Facts requests are never cached here.
-const CACHE = 'calorie-tracker-v2';
+const CACHE = 'calorie-tracker-v3';
 const SHELL = [
   './', 'index.html', 'styles.css', 'icon.svg', 'manifest.webmanifest', 'data/foods.json', 'data/packs.json',
   'src/app.js', 'src/nutrients.js', 'src/targets.js', 'src/meals.js', 'src/planner.js', 'src/search.js',
-  'src/store.js', 'src/cloud.js', 'src/fooddb.js', 'src/trend.js', 'src/units.js', 'src/importers/sr28.js', 'src/importers/off.js',
+  'src/store.js', 'src/cloud.js', 'src/fooddb.js', 'src/trend.js', 'src/units.js', 'src/prices.js', 'src/coach.js', 'src/importers/sr28.js', 'src/importers/off.js',
 ];
 
 self.addEventListener('install', (e) => {

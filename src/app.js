@@ -4,7 +4,12 @@
 import { NUTRIENTS, NUTRIENT_BY_KEY, MICRO_KEYS, nutrientsForGrams, sumNutrients, round } from './nutrients.js';
 import { computeTargets, assessIntake, ACTIVITY_LEVELS, LOSS_RATES, SAFETY } from './targets.js';
 import { MEALS } from './meals.js';
-import { planWeek, alternativesForSlot, replaceMeal, shoppingList, SLOTS, SLOT_LABELS, DIETS, EXCLUSIONS } from './planner.js';
+import {
+  planWeek, alternativesForSlot, replaceMeal, shoppingList, cleanPlan, prepBatches, rankPrepMeals, mealAllowed, mealIngredients,
+  SLOTS, SLOT_LABELS, DIETS, EXCLUSIONS, PREP_SLOTS,
+} from './planner.js';
+import { costShoppingList, formatPounds, SHOPS, PRICES_AS_OF } from './prices.js';
+import { buildVocab, localCoach, applyCoachChanges, describeChanges, coachPrompt, parseCoachReply } from './coach.js';
 import { searchFoods, buildIndex } from './search.js';
 import { buildSearchUrl, buildModernSearchUrl, normaliseModernSearchResponse, buildProductUrl, normaliseSearchResponse, normaliseProductResponse, UK_STORES, isValidBarcode } from './importers/off.js';
 import { unpackDatabase, mergeFoods } from './fooddb.js';
@@ -486,22 +491,57 @@ function submitQuickAdd(form) {
 // ---------- Meal plan ----------
 
 let planBusy = false;
+let coachLog = []; // this visit's coach conversation: [{ role: 'user'|'coach', text, lines? }]
+let coachBusy = false;
+let sample = null; // Claude, when the app runs inside claude.ai (AI coach)
+let vocab = null;
+let shoppingEdit = false;
+
+function coachVocab() {
+  vocab ??= buildVocab(mealIngredients(MEALS), foods);
+  return vocab;
+}
+
+const foodName = (id) => foods.get(id.includes(':') ? id : `uk:${id}`)?.name ?? id;
+const mealName = (id) => MEALS.find((m) => m.id === id)?.name ?? id;
+const dayName = (i, style = 'long') => parseLocalDate(addDays(S.plan?.startDate ?? localDateStr(), i)).toLocaleDateString('en-GB', { weekday: style });
+
+function prepSelect(slot, o, t) {
+  const v = o.prep?.[slot] || false;
+  const allowed = MEALS.filter((m) => m.slots.includes(slot) && mealAllowed(m, foods, o));
+  const opts = [['', `Different ${slot} each day`], ['auto', `Same ${slot} every day (planner picks)`],
+    ...allowed.map((m) => [m.id, `Same every day: ${m.name}${m.keeps >= 2 ? ' (batch-cook)' : ''}`])];
+  return `<label for="prep-${slot}">${SLOT_LABELS[slot]}</label><select id="prep-${slot}" name="prep-${slot}">${opts.map(([k, l]) => `<option value="${esc(k)}" ${String(v || '') === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+}
 
 function renderPlan() {
   const t = getTargets();
   if (!t) { view.innerHTML = `<div class="card"><h2>Meal plan</h2><p>Set up your profile first so the planner knows your targets.</p><a class="btn primary" href="#profile">Set up profile</a></div>`; return; }
   if (t.blocked) { view.innerHTML = `<div class="notice bad">${esc(t.blocked)}</div>`; return; }
   const o = S.planOptions;
+  const disliked = o.dislikedFoods ?? [];
+  const dislikedMeals = o.dislikedMeals ?? [];
   let html = `<div class="card"><h2>Plan a week of meals</h2>
     <p class="small muted">Meals are picked and portioned to hit about ${fmt(t.kcal)} kcal and ${t.macros.protein.target} g protein a day, at least ${t.macros.fibre.target} g fibre, under the UK limits for salt and saturated fat, and as many vitamins and minerals as possible.</p>
     <form id="plan-form"><label for="diet">Diet</label><select id="diet" name="diet">${Object.entries(DIETS).map(([k, d]) => `<option value="${k}" ${o.diet === k ? 'selected' : ''}>${esc(d.label)}</option>`).join('')}</select>
-    <label>Leave out</label>${EXCLUSIONS.map((e) => `<label class="inline"><input type="checkbox" name="exclude" value="${e.id}" ${o.exclude.includes(e.id) ? 'checked' : ''}> ${esc(e.label)}</label>`).join('')}
+    <label>Leave out (allergies and diets)</label>${EXCLUSIONS.map((e) => `<label class="inline"><input type="checkbox" name="exclude" value="${e.id}" ${o.exclude.includes(e.id) ? 'checked' : ''}> ${esc(e.label)}</label>`).join('')}
+    <label>Foods not eaten</label>
+    <div class="chips" id="disliked-chips">${disliked.length ? disliked.map((id) => `<button type="button" class="chip" data-action="undislike-food" data-id="${esc(id)}" aria-label="Allow ${esc(foodName(id))} again">${esc(foodName(id))} ✕</button>`).join('') : '<span class="small muted">None yet. Any meal containing one of these is never planned.</span>'}</div>
+    <div class="row"><button type="button" data-action="choose-dislikes">Choose foods…</button></div>
+    ${dislikedMeals.length ? `<label>Meals not suggested</label><div class="chips">${dislikedMeals.map((id) => `<button type="button" class="chip" data-action="undislike-meal" data-id="${esc(id)}" aria-label="Suggest ${esc(mealName(id))} again">${esc(mealName(id))} ✕</button>`).join('')}</div>` : ''}
+    <h3>Meal prep</h3><p class="small muted">Have the same breakfast or lunch every day, at the same portion, so you buy the same things each week.</p>
+    ${prepSelect('breakfast', o, t)}${prepSelect('lunch', o, t)}
+    <label for="shop">Prices for</label><select id="shop" name="shop">${Object.entries(SHOPS).map(([k, sh]) => `<option value="${k}" ${o.shop === k ? 'selected' : ''}>${esc(sh.label)}</option>`).join('')}</select>
     <div class="row" style="margin-top:8px"><button class="primary" type="submit" ${planBusy ? 'disabled' : ''}>${S.plan ? 'Make a new plan' : 'Make my plan'}</button></div></form>
     <p class="small muted">Always check ingredient labels yourself if you have an allergy: products vary.</p></div>`;
+
+  html += renderCoach();
 
   if (S.plan) {
     const p = S.plan;
     const avg = p.summary.average;
+    const cost = costShoppingList(shoppingList(p, foods), { shop: o.shop, overrides: S.priceOverrides });
+    const prep = Object.entries(p.prepMeals ?? {});
     html += `<div class="card"><h3>Weekly average</h3><div class="kpis">
       <div><b>${fmt(avg.kcal)}</b><span class="small muted">kcal (target ${fmt(t.kcal)})</span></div>
       <div><b>${fmt(avg.protein)} g</b><span class="small muted">protein</span></div>
@@ -509,23 +549,40 @@ function renderPlan() {
       <div><b>${fmt(avg.satfat, 1)} g</b><span class="small muted">sat fat (max ${t.macros.satfat.max})</span></div>
       <div><b>${fmt(avg.salt, 1)} g</b><span class="small muted">salt (max 6)</span></div>
       <div><b>${fmt(avg.sugars)} g</b><span class="small muted">sugars</span></div></div>
+      <p class="small" id="plan-cost">Estimated food cost: <strong>${formatPounds(cost.usedPence)}</strong> for the week's meals; about <strong>${formatPounds(cost.buyPence)}</strong> at the till if you buy every pack new (estimates, not live prices).</p>
+      ${prep.length ? `<p class="small">Meal prep: ${prep.map(([slot, id]) => `${esc(SLOT_LABELS[slot])} is <strong>${esc(mealName(id))}</strong> every day`).join('; ')}.</p>` : ''}
       ${planAdvice(p, t)}
-      <div class="row" style="margin-top:8px"><button data-action="shopping">Shopping list</button></div></div>`;
-    const start = p.startDate ?? localDateStr();
+      <div class="row" style="margin-top:8px"><button data-action="shopping">Shopping list and prices</button>${prep.length ? '<button data-action="prep-guide">Meal prep guide</button>' : ''}</div></div>`;
     p.days.forEach((day, i) => {
-      const date = addDays(start, i);
+      const date = addDays(p.startDate ?? localDateStr(), i);
       const dlabel = parseLocalDate(date).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'short' });
       html += `<details class="card day-card" ${i === 0 ? 'open' : ''}><summary class="spread"><strong>${esc(dlabel)}</strong>
         <span class="muted small">${fmt(day.totals.kcal)} kcal · P ${fmt(day.totals.protein)} g · fibre ${fmt(day.totals.fibre)} g</span></summary>
-        ${day.meals.map((m) => `<div class="meal"><div class="spread"><div><span class="badge">${SLOT_LABELS[m.slot]}</span> <strong>${esc(m.name)}</strong></div><span class="small muted">${fmt(m.n.kcal)} kcal</span></div>
+        ${day.meals.map((m) => `<div class="meal"><div class="spread"><div><span class="badge">${SLOT_LABELS[m.slot]}</span>${p.prepMeals?.[m.slot] === m.mealId ? ' <span class="badge core">Meal prep</span>' : ''} <strong>${esc(m.name)}</strong></div><span class="small muted">${fmt(m.n.kcal)} kcal</span></div>
           <ul>${m.items.map((it) => `<li>${fmt(it.grams)} g ${esc(it.name)}</li>`).join('')}</ul>
           ${m.method ? `<div class="small muted">${esc(m.method)}${m.mins ? ` (${m.mins} min)` : ''}</div>` : ''}
           <div class="row"><button class="link" data-action="swap" data-day="${i}" data-slot="${m.slot}">Swap</button>
+          <button class="link" data-action="meal-dislike" data-day="${i}" data-slot="${m.slot}">Won't eat this</button>
           <button class="link" data-action="log-meal" data-day="${i}" data-slot="${m.slot}">Log to ${esc(parseLocalDate(date).toLocaleDateString('en-GB', { weekday: 'short' }))}</button></div></div>`).join('')}
         <div class="row"><button data-action="log-day" data-day="${i}">Log whole day</button></div></details>`;
     });
   }
   view.innerHTML = html;
+  const log = $('#coach-log');
+  if (log) log.scrollTop = log.scrollHeight;
+}
+
+function renderCoach() {
+  const smart = Boolean(sample);
+  const intro = smart
+    ? 'Tell the coach what she will and won\'t eat, in your own words. It updates the plan for you.'
+    : 'Tell the coach what she won\'t eat, for example "she hates mushrooms, fish and cottage cheese, but likes chicken", or "same breakfast and lunch every day". It updates the plan for you.';
+  return `<div class="card" id="coach"><h3>Meal coach</h3><p class="small muted">${esc(intro)}</p>
+    ${coachLog.length ? `<div class="coach-log" id="coach-log">${coachLog.map((m) => `<div class="bubble ${m.role}">${esc(m.text)}${m.lines?.length ? `<ul>${m.lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}</div>`).join('')}${coachBusy ? '<div class="bubble coach muted">Thinking…</div>' : ''}</div>` : ''}
+    <form id="coach-form"><label for="coach-text" class="sr-only">Message to the coach</label>
+    <textarea id="coach-text" name="text" rows="2" maxlength="600" placeholder="e.g. She won't eat mushrooms or salmon" ${coachBusy ? 'disabled' : ''}></textarea>
+    <div class="row" style="margin-top:6px"><button class="primary" type="submit" ${coachBusy ? 'disabled' : ''}>Send</button>
+    ${smart ? '<span class="small muted">Uses Claude (your Claude usage).</span>' : '<span class="small muted">Simple sentences work best. The smarter AI coach runs in the Claude preview.</span>'}</div></form></div>`;
 }
 
 function planAdvice(p, t) {
@@ -538,20 +595,27 @@ function planAdvice(p, t) {
   return parts.join('');
 }
 
-function submitPlan(form) {
-  const t = getTargets();
-  const options = {
+function readPlanForm(form) {
+  const prep = {};
+  for (const slot of PREP_SLOTS) prep[slot] = form.elements[`prep-${slot}`].value || false;
+  return {
+    ...S.planOptions,
     diet: form.elements.diet.value,
     exclude: [...form.querySelectorAll('input[name="exclude"]:checked')].map((x) => x.value),
-    dislikedMeals: S.planOptions.dislikedMeals ?? [],
+    prep,
+    shop: form.elements.shop.value,
   };
+}
+
+/** Make a new plan with these options (new seed unless one is given). */
+function makePlan(options, { seed = Math.floor(Math.random() * 1e9), quiet = false } = {}) {
+  const t = getTargets();
   planBusy = true;
   render();
   setTimeout(() => {
     try {
-      const seed = Math.floor(Math.random() * 1e9);
       const plan = planWeek({ targets: t, foods, meals: MEALS, options: { ...options, seed } });
-      commit({ ...S, plan: { ...plan, startDate: localDateStr() }, planOptions: options });
+      commit({ ...S, plan: { ...plan, startDate: S.plan?.startDate && quiet ? S.plan.startDate : localDateStr() }, planOptions: options });
     } catch (e) {
       toast(e.message, 6000);
       commit({ ...S, planOptions: options });
@@ -562,8 +626,88 @@ function submitPlan(form) {
   }, 20);
 }
 
+function submitPlan(form) {
+  makePlan(readPlanForm(form));
+}
+
+/**
+ * Save new options (dislikes, prep) and fix the current plan to match:
+ * meals that are no longer allowed are swapped for the best alternative;
+ * a meal-prep change re-plans the week. Returns a short description.
+ */
+function applyOptions(options) {
+  const t = getTargets();
+  const prepChanged = S.plan && PREP_SLOTS.some((s) => (S.planOptions.prep?.[s] || false) !== (options.prep?.[s] || false));
+  if (!S.plan || !t) { commit({ ...S, planOptions: options }); return ''; }
+  try {
+    if (prepChanged) {
+      const plan = planWeek({ targets: t, foods, meals: MEALS, options: { ...options, seed: S.plan.createdWith?.seed ?? 1 } });
+      commit({ ...S, plan: { ...plan, startDate: S.plan.startDate }, planOptions: options });
+      return 'Re-planned the week.';
+    }
+    const res = cleanPlan({ plan: S.plan, targets: t, foods, meals: MEALS, options });
+    commit({ ...S, plan: { ...res.plan, startDate: S.plan.startDate }, planOptions: options });
+    if (res.replanned) return 'Re-planned the week around the change.';
+    return res.changed ? `Swapped ${res.changed} planned meal${res.changed === 1 ? '' : 's'}.` : 'Your current plan already fits.';
+  } catch (e) {
+    commit({ ...S, planOptions: options });
+    toast(e.message, 6000);
+    return e.message;
+  }
+}
+
+function openDislikes(filter = '') {
+  const ids = [...mealIngredients(MEALS)].map((id) => foods.get(id)).filter(Boolean);
+  const fresh = !(sheet.open && $('#dislike-list'));
+  if (fresh) openDislikes.pending = new Set(S.planOptions.dislikedFoods ?? []);
+  const chosen = openDislikes.pending;
+  const q = filter.trim().toLowerCase();
+  const shown = ids.filter((f) => !q || f.name.toLowerCase().includes(q) || (f.aliases ?? []).some((a) => a.includes(q)));
+  shown.sort((a, b) => a.cat.localeCompare(b.cat) || a.name.localeCompare(b.name));
+  let cat = '';
+  const list = shown.map((f) => {
+    const head = f.cat !== cat ? `<h4>${esc(f.cat)}</h4>` : '';
+    cat = f.cat;
+    const id = f.id.replace(/^uk:/, '');
+    return `${head}<label class="inline"><input type="checkbox" name="food" value="${esc(id)}" ${chosen.has(id) ? 'checked' : ''}> ${esc(f.name)}</label>`;
+  }).join('');
+  const body = `<p class="small muted">Tick everything she won't eat. Meals containing any of these are never planned, and meals already in the plan are swapped.</p>
+    <input type="search" id="dislike-filter" placeholder="Filter, e.g. mushroom" value="${esc(filter)}" aria-label="Filter foods">
+    <form id="dislike-form"><div id="dislike-list">${list || '<p class="muted">No matching foods.</p>'}</div>
+    <div class="row sticky-actions"><button class="primary" type="submit">Save</button><button type="button" data-action="close-sheet">Cancel</button></div></form>`;
+  if (!fresh) {
+    $('#dislike-list').innerHTML = list || '<p class="muted">No matching foods.</p>';
+  } else {
+    openSheet('Foods she won\'t eat', body);
+  }
+}
+
+function submitDislikes() {
+  const msg = applyOptions({ ...S.planOptions, dislikedFoods: [...openDislikes.pending] });
+  closeSheet();
+  if (msg) toast(msg);
+}
+
+function openMealDislike(dayIndex, slot) {
+  const m = S.plan.days[dayIndex].meals.find((x) => x.slot === slot);
+  openMealDislike.meal = m;
+  openSheet(m.name, `<p>What doesn't she like about it?</p>
+    <ul class="results">${m.items.map((it) => `<li tabindex="0" data-action="dislike-food" data-id="${esc(it.foodId.replace(/^uk:/, ''))}"><div class="grow">${esc(it.name)}</div><span class="small muted">Never plan this</span></li>`).join('')}</ul>
+    <div class="row" style="margin-top:12px"><button class="danger" data-action="dislike-meal" data-id="${esc(m.mealId)}">Never suggest this meal</button><button data-action="close-sheet">Cancel</button></div>`);
+}
+
 function openSwap(dayIndex, slot) {
   const t = getTargets();
+  if (S.plan.prepMeals?.[slot]) {
+    const ranked = rankPrepMeals({ targets: t, foods, meals: MEALS, options: S.planOptions, slot, limit: 10 })
+      .filter((r) => r.cand.meal.id !== S.plan.prepMeals[slot]);
+    openSwap.prep = ranked.map((r) => r.cand.meal.id);
+    openSheet(`Swap the meal-prep ${slot}`, ranked.length
+      ? `<p class="small muted">This changes ${slot} on every day, and the week is re-planned around it. Best fit first.</p><ul class="results">${ranked.map((r, i) => `<li tabindex="0" data-action="do-prep-swap" data-slot="${slot}" data-i="${i}">
+        <div class="grow"><strong>${esc(r.cand.meal.name)}</strong><div class="small muted">${r.cand.meal.keeps >= 2 ? `Batch-cook: keeps ${r.cand.meal.keeps} days` : 'Make fresh each day'} · ${r.cand.meal.mins} min</div></div></li>`).join('')}</ul>`
+      : '<p>No other meals fit your choices for this slot.</p>');
+    return;
+  }
   const alts = alternativesForSlot({ plan: S.plan, dayIndex, slot, targets: t, foods, meals: MEALS, options: S.planOptions });
   openSheet(`Swap ${SLOT_LABELS[slot].toLowerCase()}`, alts.length
     ? `<p class="small muted">Best options for this day's other meals, best fit first.</p><ul class="results">${alts.map((m, i) => `<li tabindex="0" data-action="do-swap" data-day="${dayIndex}" data-i="${i}">
@@ -588,18 +732,91 @@ function logPlannedMeals(dayIndex, slots) {
   toast(`Logged to ${parseLocalDate(date).toLocaleDateString('en-GB', { weekday: 'long' })}'s diary`);
 }
 
+const gramsText = (g) => (g >= 1000 ? `${round(g / 1000, 2)} kg` : `${g} g`);
+
 function openShopping() {
-  const rows = shoppingList(S.plan, foods);
+  const o = S.planOptions;
+  const cost = costShoppingList(shoppingList(S.plan, foods), { shop: o.shop, overrides: S.priceOverrides });
+  const shop = SHOPS[o.shop] ?? SHOPS.typical;
   let cat = '';
-  const text = rows.map((r) => `${r.name}: ${r.grams} g`).join('\n');
-  openSheet('Shopping list', `<p class="small muted">Total weights for the week as eaten (cooked weights for meat, rice and pasta unless it says raw or dried). Round up to pack sizes.</p>
-    <table><tbody>${rows.map((r) => {
-      const head = r.cat !== cat ? `<tr><th colspan="2">${esc(r.cat)}</th></tr>` : '';
-      cat = r.cat;
-      return `${head}<tr><td>${esc(r.name)}</td><td class="num">${r.grams >= 1000 ? `${round(r.grams / 1000, 2)} kg` : `${r.grams} g`}</td></tr>`;
-    }).join('')}</tbody></table>
-    <div class="row" style="margin-top:12px"><button class="primary" data-action="copy-list">Copy list</button></div>`);
-  openShopping.text = text;
+  const lines = [];
+  const rowsHtml = cost.rows.map((r) => {
+    const head = r.cat !== cat ? `<tr><th colspan="3">${esc(r.cat)}</th></tr>` : '';
+    cat = r.cat;
+    const p = r.price;
+    const buy = p ? `${p.packs} × ${esc(p.pack)}${p.staple ? ' <span class="badge">cupboard</span>' : ''}` : '';
+    lines.push(`${r.name}: ${gramsText(r.grams)}${p ? ` (${p.packs} × ${p.pack}, ${formatPounds(p.buyPence)})` : ''}`);
+    const priceCell = !p ? '–' : shoppingEdit
+      ? `<input type="number" class="price-input" min="0" max="999" step="0.01" inputmode="decimal" data-price-id="${esc(r.foodId.replace(/^uk:/, ''))}" value="${(p.packPence / 100).toFixed(2)}" aria-label="Price per pack for ${esc(r.name)} in pounds">`
+      : `${formatPounds(p.buyPence)}${p.custom ? '*' : ''}`;
+    return `${head}<tr><td>${esc(r.name)}<div class="small muted">${buy}</div></td><td class="num">${gramsText(r.grams)}</td><td class="num">${priceCell}</td></tr>`;
+  }).join('');
+  openShopping.text = `${lines.join('\n')}\n\nEstimated: ${formatPounds(cost.buyPence)} at the till (plus ${formatPounds(cost.staplesPence)} if you need cupboard staples).`;
+  openSheet('Shopping list', `<div class="notice info small">About <strong>${formatPounds(cost.buyPence)}</strong> at the till for this week, buying whole packs (plus ${formatPounds(cost.staplesPence)} if you need to restock cupboard staples like oil and spices). The food actually eaten this week costs about <strong>${formatPounds(cost.usedPence)}</strong>; leftovers carry over to next week.</div>
+    <p class="small muted">Prices are estimates for ${esc(shop.label)} based on typical ${PRICES_AS_OF} own-brand prices, not live prices. Tap "Edit prices" to enter what you pay${Object.keys(S.priceOverrides ?? {}).length ? ' (* = your price)' : ''}. Weights are as eaten: cooked weights for meat, rice and pasta unless it says raw or dried.</p>
+    <table class="shop"><thead><tr><th>Item</th><th class="num">Needed</th><th class="num">Price</th></tr></thead><tbody>${rowsHtml}</tbody></table>
+    <div class="row" style="margin-top:12px"><button class="primary" data-action="copy-list">Copy list</button>
+    <button data-action="edit-prices">${shoppingEdit ? 'Done editing' : 'Edit prices'}</button>
+    ${Object.keys(S.priceOverrides ?? {}).length ? '<button class="link" data-action="reset-prices">Use estimated prices</button>' : ''}</div>`);
+}
+
+function openPrepGuide() {
+  const batches = prepBatches(S.plan, MEALS);
+  const html = batches.map((b) => {
+    const per = b.portion ? b.portion.items.map((it) => `${fmt(it.grams)} g ${esc(it.name)}`).join(', ') : '';
+    const plan = b.batches.length
+      ? `<p>Cook in ${b.batches.length} batch${b.batches.length === 1 ? '' : 'es'} so nothing is kept longer than ${b.keeps} days in the fridge:</p>
+        ${b.batches.map((x) => `<div class="meal"><strong>${esc(dayName(x.startDay))}: make ${x.portions} portions</strong>
+          <ul>${x.items.map((it) => `<li>${esc(gramsText(Math.round(it.grams)))} ${esc(it.name)}</li>`).join('')}</ul></div>`).join('')}
+        <p class="small muted">Cool cooked food within 2 hours and keep it in the fridge in sealed boxes. Reheat until steaming hot all the way through. Cook rice fresh, or cool it quickly and eat it within 24 hours.</p>`
+      : `<p>This one is best made fresh each day (it only takes ${b.portion?.mins ?? 'a few'} minutes), but it's the same every day so the weekly shop stays the same.</p>`;
+    return `<div class="card"><h3>${esc(SLOT_LABELS[b.slot])}: ${esc(b.name)}</h3><p class="small">Every day, ${b.portions} days: ${per}.</p>
+      ${b.method ? `<p class="small muted">${esc(b.method)}</p>` : ''}${plan}
+      ${S.planOptions.prep?.[b.slot] !== b.mealId ? `<button data-action="keep-prep" data-slot="${b.slot}" data-id="${esc(b.mealId)}">Keep this ${b.slot} for future weeks</button>` : '<p class="small muted">Kept for future weeks. Change it under Meal prep.</p>'}</div>`;
+  }).join('');
+  openSheet('Meal prep guide', html || '<p>Turn on meal prep for breakfast or lunch, then make a plan.</p>');
+}
+
+async function sendCoach(form) {
+  const text = form.elements.text.value.trim();
+  if (!text || coachBusy) return;
+  coachLog = [...coachLog, { role: 'user', text }];
+  const v = coachVocab();
+  let changes;
+  let reply = '';
+  if (sample) {
+    coachBusy = true;
+    render();
+    try {
+      const prompt = coachPrompt(text, { vocab: v, meals: MEALS, options: S.planOptions, history: coachLog.slice(0, -1) });
+      const answer = await sample.json(prompt, { modelTier: 'quick', cache: false });
+      changes = parseCoachReply(answer, { vocab: v, meals: MEALS });
+      reply = changes.reply;
+      if (changes.unmatched?.length) reply += ` (Not in the meal library, so nothing to change: ${changes.unmatched.join(', ')}.)`;
+    } catch (e) {
+      if (e?.code === 'not_granted') sample = null;
+      changes = null;
+    } finally {
+      coachBusy = false;
+    }
+  }
+  if (!changes) changes = localCoach(text, { vocab: v, meals: MEALS });
+  // Only report "allowed again" for things that were actually off the menu.
+  changes = {
+    ...changes,
+    allowFoods: (changes.allowFoods ?? []).filter((id) => S.planOptions.dislikedFoods?.includes(id.replace(/^uk:/, ''))),
+    allowMeals: (changes.allowMeals ?? []).filter((id) => S.planOptions.dislikedMeals?.includes(id)),
+  };
+  const lines = describeChanges(changes, { foods, meals: MEALS });
+  let result = '';
+  if (lines.length) {
+    result = applyOptions(applyCoachChanges(S.planOptions, changes));
+    if (!reply) reply = 'Done. Here\'s what I changed:';
+  } else if (!reply) {
+    reply = 'I couldn\'t match that to any foods in the meal plan. Try naming the foods, for example "she won\'t eat mushrooms, tuna or feta".';
+  }
+  coachLog = [...coachLog, { role: 'coach', text: reply, lines: result ? [...lines, result] : lines }].slice(-20);
+  render();
 }
 
 // ---------- Progress ----------
@@ -781,6 +998,8 @@ async function connectCloud() {
   try {
     const [db, user] = await Promise.all([window.claude.use('db'), window.claude.use('user')]);
     downloads = await window.claude.use('downloads');
+    sample = await window.claude.use('sample');
+    if (sample && currentTab() === 'plan') render();
     const uid = db && user ? await user.id() : null;
     if (!db || !uid) { $('#status').textContent = 'Saved on this device only'; return; }
     const sync = createCloudSync({ db, uid, getState: () => S, onError: (e) => toast(e?.code === 'quota_exceeded' ? 'Your account storage for this page is full. Export a backup.' : "Couldn't save to your account. Changes are kept on this device for now.", 6000) });
@@ -837,7 +1056,41 @@ document.addEventListener('click', (ev) => {
     }
     case 'log-meal': logPlannedMeals(Number(el.dataset.day), [el.dataset.slot]); break;
     case 'log-day': logPlannedMeals(Number(el.dataset.day), SLOTS); break;
-    case 'shopping': openShopping(); break;
+    case 'shopping': shoppingEdit = false; openShopping(); break;
+    case 'edit-prices': shoppingEdit = !shoppingEdit; openShopping(); break;
+    case 'reset-prices': commit({ ...S, priceOverrides: {} }, { rerender: true }); openShopping(); break;
+    case 'prep-guide': openPrepGuide(); break;
+    case 'keep-prep': {
+      const options = { ...S.planOptions, prep: { ...S.planOptions.prep, [el.dataset.slot]: el.dataset.id } };
+      commit({ ...S, planOptions: options });
+      openPrepGuide();
+      toast('Kept for future weeks');
+      break;
+    }
+    case 'do-prep-swap': {
+      const id = openSwap.prep[Number(el.dataset.i)];
+      closeSheet();
+      makePlan({ ...S.planOptions, prep: { ...S.planOptions.prep, [el.dataset.slot]: id } }, { seed: S.plan.createdWith?.seed ?? 1, quiet: true });
+      break;
+    }
+    case 'choose-dislikes': openDislikes(); break;
+    case 'undislike-food': toast(applyOptions({ ...S.planOptions, dislikedFoods: S.planOptions.dislikedFoods.filter((x) => x !== el.dataset.id) }) || 'Removed'); break;
+    case 'undislike-meal': toast(applyOptions({ ...S.planOptions, dislikedMeals: S.planOptions.dislikedMeals.filter((x) => x !== el.dataset.id) }) || 'Removed'); break;
+    case 'meal-dislike': openMealDislike(Number(el.dataset.day), el.dataset.slot); break;
+    case 'dislike-food': {
+      const id = el.dataset.id;
+      closeSheet();
+      const msg = applyOptions({ ...S.planOptions, dislikedFoods: [...new Set([...(S.planOptions.dislikedFoods ?? []), id])] });
+      toast(`${foodName(id)} won't be planned. ${msg}`, 5000);
+      break;
+    }
+    case 'dislike-meal': {
+      const id = el.dataset.id;
+      closeSheet();
+      const msg = applyOptions({ ...S.planOptions, dislikedMeals: [...new Set([...(S.planOptions.dislikedMeals ?? []), id])] });
+      toast(`${mealName(id)} won't be suggested. ${msg}`, 5000);
+      break;
+    }
     case 'copy-list': navigator.clipboard?.writeText(openShopping.text).then(() => toast('Copied'), () => toast('Copy failed')); break;
     case 'del-weight': askConfirm('Delete this weight entry?', 'Delete', () => commit(removeWeight(S, el.dataset.date))); break;
     case 'confirm-yes': { const fn = askConfirm.pending; askConfirm.pending = null; closeSheet(); fn?.(); break; }
@@ -891,6 +1144,31 @@ document.addEventListener('change', async (ev) => {
 
 document.addEventListener('input', (ev) => {
   if (ev.target.closest('#portion-form')) updatePortionPreview();
+  if (ev.target.id === 'dislike-filter') openDislikes(ev.target.value);
+});
+
+// Edited shopping prices are saved when the field is left.
+document.addEventListener('change', (ev) => {
+  // Plan settings are kept as soon as they change, so other actions on the
+  // page (choosing dislikes, the coach) don't undo them.
+  const planForm = ev.target.closest('#plan-form');
+  if (planForm) {
+    const next = readPlanForm(planForm);
+    const refresh = ev.target.name === 'diet' || ev.target.name === 'exclude';
+    commit({ ...S, planOptions: next }, { rerender: refresh });
+    return;
+  }
+  if (ev.target.name === 'food' && ev.target.closest('#dislike-form')) {
+    if (ev.target.checked) openDislikes.pending.add(ev.target.value); else openDislikes.pending.delete(ev.target.value);
+    return;
+  }
+  const id = ev.target.dataset?.priceId;
+  if (!id) return;
+  const v = Number(ev.target.value);
+  if (ev.target.value === '' || !Number.isFinite(v) || v < 0 || v >= 1000) { toast('Enter a price in pounds, like 1.25'); return; }
+  commit({ ...S, priceOverrides: { ...S.priceOverrides, [id]: Math.round(v * 100) / 100 } }, { rerender: true });
+  openShopping();
+  document.querySelector(`[data-price-id="${CSS.escape(id)}"]`)?.focus();
 });
 
 document.addEventListener('submit', (ev) => {
@@ -901,6 +1179,8 @@ document.addEventListener('submit', (ev) => {
   else if (f.id === 'custom-form') submitCustomFood(f);
   else if (f.id === 'quick-form') submitQuickAdd(f);
   else if (f.id === 'plan-form') submitPlan(f);
+  else if (f.id === 'dislike-form') submitDislikes();
+  else if (f.id === 'coach-form') sendCoach(f);
   else if (f.id === 'profile-form') submitProfile(f);
   else if (f.id === 'weight-form') {
     try {

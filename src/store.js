@@ -18,7 +18,11 @@ export function emptyState() {
     productCache: {}, // supermarket products you have used, so they work offline
     recentFoods: [],
     plan: null,
-    planOptions: { diet: 'omnivore', exclude: [], dislikedMeals: [] },
+    // dislikedFoods: curated food ids (no "uk:" prefix) never to plan.
+    // prep: per slot, false (vary daily), 'auto' (same meal all week, planner
+    // picks) or a meal id to keep week after week. shop: price level.
+    planOptions: { diet: 'omnivore', exclude: [], dislikedMeals: [], dislikedFoods: [], prep: { breakfast: false, lunch: false }, shop: 'typical' },
+    priceOverrides: {}, // food id -> price in pounds the person pays per pack
     stamps: {}, // when each saved document last changed (for account sync)
   };
 }
@@ -32,6 +36,13 @@ export function validateState(raw) {
   const s = { ...emptyState(), ...raw };
   s.settings = { ...emptyState().settings, ...(isObj(raw.settings) ? raw.settings : {}) };
   s.planOptions = { ...emptyState().planOptions, ...(isObj(raw.planOptions) ? raw.planOptions : {}) };
+  const strings = (a) => (Array.isArray(a) ? a.filter((x) => typeof x === 'string') : []);
+  for (const k of ['exclude', 'dislikedMeals', 'dislikedFoods']) s.planOptions[k] = strings(s.planOptions[k]);
+  const prep = isObj(s.planOptions.prep) ? s.planOptions.prep : {};
+  s.planOptions.prep = Object.fromEntries(['breakfast', 'lunch'].map((k) => [k, typeof prep[k] === 'string' ? prep[k] : prep[k] === true ? 'auto' : false]));
+  s.priceOverrides = isObj(raw.priceOverrides)
+    ? Object.fromEntries(Object.entries(raw.priceOverrides).filter(([, v]) => Number.isFinite(v) && v >= 0 && v < 1000))
+    : {};
   if (!isObj(s.diary)) s.diary = {};
   for (const [date, entries] of Object.entries(s.diary)) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Array.isArray(entries)) { delete s.diary[date]; continue; }

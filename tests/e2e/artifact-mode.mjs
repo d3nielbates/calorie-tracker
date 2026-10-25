@@ -41,7 +41,14 @@ const FAKE_PLATFORM = () => {
   };
   const user = { id: async () => 'viewer-1' };
   const downloads = { save: async (f) => { window.__saved = f; } };
-  window.claude = { use: (name) => new Promise((r) => setTimeout(() => r({ db, user, downloads }[name] ?? null), 30)) };
+  // A stand-in for Claude: records the prompt and answers like the coach would.
+  const sample = async () => ({ text: '', truncated: false });
+  sample.json = async (input) => {
+    window.__prompt = input;
+    if (input.includes('Person: FAIL')) throw { code: 'rate_limited', message: 'slow down' };
+    return { dislikeFoods: ['mushrooms', 'not-a-food'], allowFoods: [], dislikeMeals: [], allowMeals: [], prep: { breakfast: true, lunch: null }, unmatched: ['olives'], reply: 'Got it: no mushrooms, and the same breakfast every day.' };
+  };
+  window.claude = { use: (name) => new Promise((r) => setTimeout(() => r({ db, user, downloads, sample }[name] ?? null), 30)) };
 };
 
 const results = [];
@@ -116,6 +123,34 @@ await step('backup export goes through the download capability', async () => {
   const f = await page.evaluate(() => window.__saved);
   assert.match(f.filename, /^calorie-tracker-backup-\d{4}-\d{2}-\d{2}\.json$/);
   assert.equal(JSON.parse(f.data).profile.sex, 'female');
+});
+
+await step('AI coach turns a message into plan changes', async () => {
+  await page.click('a[data-tab="plan"]');
+  await page.waitForSelector('#plan-form');
+  await page.getByRole('button', { name: 'Make my plan' }).click();
+  await page.waitForSelector('.day-card', { timeout: 10000 });
+  assert.match(await page.locator('#coach').innerText(), /Uses Claude/);
+  await page.fill('#coach-text', 'She hates olives and mushrooms. Same breakfast every day please');
+  await page.getByRole('button', { name: 'Send' }).click();
+  await page.waitForSelector('.bubble.coach:not(.muted)');
+  const txt = await page.locator('#coach').innerText();
+  assert.match(txt, /Got it: no mushrooms/);
+  assert.match(txt, /Not in the meal library.*olives/);
+  assert.match(await page.evaluate(() => window.__prompt), /Person: She hates olives and mushrooms/);
+  const st = await page.evaluate(() => window.__app.state);
+  assert.deepEqual(st.planOptions.dislikedFoods, ['mushrooms']);
+  assert.equal(st.planOptions.prep.breakfast, 'auto');
+  assert.ok(st.plan.prepMeals.breakfast);
+  assert.ok(!st.plan.days.some((d) => d.meals.some((m) => m.items.some((i) => i.foodId === 'uk:mushrooms'))));
+  assert.equal(new Set(st.plan.days.map((d) => d.meals[0].mealId)).size, 1);
+});
+
+await step('if Claude is unavailable the coach still understands simple sentences', async () => {
+  await page.fill('#coach-text', 'FAIL');
+  await page.getByRole('button', { name: 'Send' }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.bubble.coach').length >= 2);
+  assert.match(await page.locator('.bubble.coach').last().innerText(), /couldn't match/);
 });
 
 await step('no JavaScript errors', async () => { assert.deepEqual(errors, [], errors.join(' | ')); });

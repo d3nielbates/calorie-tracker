@@ -128,3 +128,15 @@ video#scanner { width: 100%; border-radius: 10px; background: #000; max-height: 
 .kpis div { background: var(--bg); border-radius: 10px; padding: 8px; text-align: center; }
 .kpis b { display: block; font-size: 1.1rem; }
 @media (max-width: 380px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+.chip { border: 1px solid var(--line); background: var(--accent-soft); color: var(--text); border-radius: 999px; padding: 4px 10px; min-height: 32px; font-size: .85rem; }
+.coach-log { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.bubble { border-radius: 12px; padding: 8px 10px; max-width: 88%; font-size: .9rem; }
+.bubble.user { align-self: flex-end; background: var(--accent-soft); }
+.bubble.coach { align-self: flex-start; background: var(--bar); }
+.bubble ul { margin: 4px 0 0; padding-left: 18px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.sticky-actions { position: sticky; bottom: 0; background: var(--card); padding: 8px 0; }
+.shop td { vertical-align: top; }
+.price-input { width: 5.5em; text-align: right; }
+#dislike-list h4 { margin: 12px 0 2px; font-size: .85rem; color: var(--muted); }

@@ -30,9 +30,23 @@ Profile → Export backup to keep a copy or move to another device.
   fibre, salt and 19 vitamins and minerals, with progress bars.
 - **Weight tracking**: kg or stone/lb, smoothed trend line, weekly rate,
   projected goal date.
-- **Weekly meal planner**: 57 UK-style meals, portioned to your targets; diet
+- **Weekly meal planner**: 122 UK-style meals, portioned to your targets; diet
   (vegan, vegetarian, pescatarian) and allergen exclusions; swap any meal;
   shopping list; log a planned meal or day to the diary.
+- **Foods someone won't eat**: tick foods (or tap "Won't eat this" on a
+  planned meal) and no meal containing them is planned; planned meals are
+  swapped straight away. Single meals can be hidden too.
+- **Meal prep**: the same breakfast and/or lunch every day at the same
+  portion, chosen by the planner or by you and kept week to week, with a
+  batch-cooking guide that respects fridge times.
+- **Estimated prices**: typical 2025 UK own-brand prices for every curated
+  food (`src/prices.js`), priced as whole packs and as food eaten, adjustable
+  by supermarket type, and editable with your own prices. These are
+  estimates; there is no open live UK price feed.
+- **Meal coach**: type "she hates mushrooms and fish but likes chicken" and
+  the plan updates. Inside the Claude preview it uses Claude (the `sample`
+  capability) and validates the answer; elsewhere a built-in sentence reader
+  handles simple messages.
 
 ## How targets are calculated (`src/targets.js`)
 
@@ -94,7 +108,9 @@ npm run build:foods  # rebuild data/foods.json after editing data-src/uk-foods.m
 ## Code map
 
 - `src/targets.js`: energy and nutrient targets, safety rules
-- `src/planner.js`, `src/meals.js`: meal planner and meal library
+- `src/planner.js`, `src/meals.js`: meal planner, meal prep and meal library
+- `src/prices.js`: estimated UK prices and shopping-list costing
+- `src/coach.js`: meal coach (sentence reader, Claude prompt and validation)
 - `src/importers/`: USDA SR28 parser, Open Food Facts API and CSV importers
 - `src/search.js`: food search with UK→US synonyms
 - `src/store.js`: diary, weights, custom foods, storage and backups

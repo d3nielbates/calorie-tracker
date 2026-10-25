@@ -255,6 +255,94 @@ await step('shopping list', async () => {
   await page.click('[data-action="close-sheet"]');
 });
 
+await step('shopping list shows estimated prices you can change', async () => {
+  await page.click('[data-action="shopping"]');
+  const txt = await page.locator('#sheet-body').innerText();
+  assert.match(txt, /About £\d+\.\d\d at the till/);
+  assert.match(txt, /estimates/);
+  await page.click('[data-action="edit-prices"]');
+  const input = page.locator('.price-input').first();
+  const id = await input.getAttribute('data-price-id');
+  await input.fill('9.99');
+  await input.dispatchEvent('change');
+  assert.equal(await page.evaluate((k) => window.__app.state.priceOverrides[k], id), 9.99);
+  await page.click('[data-action="reset-prices"]');
+  assert.deepEqual(await page.evaluate(() => window.__app.state.priceOverrides), {});
+  await page.click('[data-action="close-sheet"]');
+  assert.match(await page.locator('#plan-cost').innerText(), /£\d/);
+});
+
+const planFoodIds = () => page.evaluate(() => window.__app.state.plan.days.flatMap((d) => d.meals.flatMap((m) => m.items.map((i) => i.foodId))));
+
+await step('foods she won\'t eat are never planned', async () => {
+  await page.selectOption('#diet', 'omnivore');
+  await page.click('[data-action="choose-dislikes"]');
+  await page.fill('#dislike-filter', 'mushroom');
+  await page.locator('#dislike-list input[value="mushrooms"]').check();
+  await page.fill('#dislike-filter', 'salmon');
+  for (const box of await page.locator('#dislike-list input').all()) await box.check();
+  await page.fill('#dislike-filter', '');
+  assert.ok(await page.locator('#dislike-list input[value="mushrooms"]').isChecked(), 'tick kept after filtering');
+  await page.getByRole('button', { name: 'Save' }).click();
+  const disliked = await page.evaluate(() => window.__app.state.planOptions.dislikedFoods);
+  assert.ok(disliked.includes('mushrooms') && disliked.includes('salmon-cooked'), disliked.join());
+  assert.match(await page.locator('#disliked-chips').innerText(), /Mushrooms/);
+  await page.getByRole('button', { name: 'Make a new plan' }).click();
+  await page.waitForTimeout(400);
+  const used = await planFoodIds();
+  for (const id of ['uk:mushrooms', 'uk:salmon-cooked', 'uk:salmon-raw', 'uk:smoked-salmon']) assert.ok(!used.includes(id), id);
+});
+
+await step('"won\'t eat this" removes an ingredient from the whole plan', async () => {
+  await page.locator('.day-card[open] [data-action="meal-dislike"]').first().click();
+  const li = page.locator('#sheet-body li').first();
+  const id = await li.getAttribute('data-id');
+  await li.click();
+  assert.ok(await page.evaluate((k) => window.__app.state.planOptions.dislikedFoods.includes(k), id));
+  assert.ok(!(await planFoodIds()).includes(`uk:${id}`), id);
+  await page.locator('.day-card[open] [data-action="meal-dislike"]').nth(2).click();
+  const mealId = await page.locator('[data-action="dislike-meal"]').getAttribute('data-id');
+  await page.click('[data-action="dislike-meal"]');
+  assert.ok(!(await page.evaluate(() => window.__app.state.plan.days.flatMap((d) => d.meals.map((m) => m.mealId)))).includes(mealId));
+});
+
+await step('meal prep: same breakfast and lunch every day, with a prep guide', async () => {
+  await page.selectOption('#prep-breakfast', 'auto');
+  await page.selectOption('#prep-lunch', 'l-lentil-soup');
+  await page.getByRole('button', { name: 'Make a new plan' }).click();
+  await page.waitForTimeout(400);
+  const days = await page.evaluate(() => window.__app.state.plan.days.map((d) => [d.meals[0].mealId, d.meals[1].mealId, JSON.stringify(d.meals[0].items)]));
+  assert.equal(new Set(days.map((d) => d[0])).size, 1);
+  assert.equal(new Set(days.map((d) => d[2])).size, 1, 'same breakfast portion every day');
+  assert.ok(days.every((d) => d[1] === 'l-lentil-soup'));
+  await page.click('[data-action="prep-guide"]');
+  const guide = await page.locator('#sheet-body').innerText();
+  assert.match(guide, /Lentil and vegetable soup/);
+  assert.match(guide, /make 4 portions/);
+  await page.click('[data-action="close-sheet"]');
+  // Swapping a prep meal changes it on every day.
+  await page.locator('.day-card[open] [data-action="swap"][data-slot="lunch"]').click();
+  await page.locator('#sheet-body li').first().click();
+  await page.waitForTimeout(400);
+  const lunches = await page.evaluate(() => window.__app.state.plan.days.map((d) => d.meals[1].mealId));
+  assert.equal(new Set(lunches).size, 1);
+  assert.notEqual(lunches[0], 'l-lentil-soup');
+});
+
+await step('coach understands what she won\'t eat and updates the plan', async () => {
+  await page.fill('#coach-text', "She won't eat tuna or feta, but she likes chicken");
+  await page.getByRole('button', { name: 'Send' }).click();
+  await page.waitForSelector('.bubble.coach');
+  const txt = await page.locator('#coach').innerText();
+  assert.match(txt, /Won't plan: .*Tuna/);
+  const disliked = await page.evaluate(() => window.__app.state.planOptions.dislikedFoods);
+  assert.ok(disliked.includes('tuna-tin') && disliked.includes('feta'));
+  const used = await planFoodIds();
+  assert.ok(!used.includes('uk:tuna-tin') && !used.includes('uk:feta'));
+  await page.locator('[data-action="undislike-food"][data-id="feta"]').click();
+  assert.ok(!(await page.evaluate(() => window.__app.state.planOptions.dislikedFoods)).includes('feta'));
+});
+
 await step('log planned day to diary as one entry per meal', async () => {
   const dayKcal = Number((await page.locator('.day-card[open] summary span').innerText()).split('kcal')[0].replace(/[^\d]/g, ''));
   const before = await page.evaluate(() => (window.__app.state.diary[Object.keys(window.__app.state.diary).sort().pop()] ?? []).length);
