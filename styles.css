@@ -140,3 +140,4 @@ video#scanner { width: 100%; border-radius: 10px; background: #000; max-height: 
 .shop td { vertical-align: top; }
 .price-input { width: 5.5em; text-align: right; }
 #dislike-list h4 { margin: 12px 0 2px; font-size: .85rem; color: var(--muted); }
+.swapnote { color: var(--accent); margin: 2px 0; }

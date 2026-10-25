@@ -41,6 +41,8 @@ export const EXCLUSIONS = [
 ];
 
 /** Small seeded PRNG (mulberry32) so plans are reproducible. */
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
 export function rng(seed) {
   let a = seed >>> 0;
   return () => {
@@ -91,6 +93,153 @@ export function mealAllowed(meal, foods, options = {}) {
   return true;
 }
 
+// Disliked ingredients are swapped for a similar food, or left out when they
+// are only a small part of the meal, so one ingredient doesn't remove a meal.
+// Flavourings and fats are always just left out.
+const FLAVOUR = new Set(['coriander', 'chilli', 'ginger', 'garlic', 'lemon-juice', 'spring-onion', 'curry-powder', 'balsamic', 'mustard',
+  'soy-sauce', 'honey', 'ketchup', 'salsa', 'pesto', 'tomato-paste', 'chicken-stock', 'olive-oil', 'rapeseed-oil', 'spread-light', 'butter', 'jam', 'sugar']);
+const bareId = (id) => id.replace(/^uk:/, '');
+
+function role(f) {
+  const id = bareId(f.id);
+  if (FLAVOUR.has(id)) return null;
+  switch (f.cat) {
+    case 'Fish & seafood': case 'Meat & poultry': return id.includes('stock') ? null : 'animal-protein';
+    case 'Dairy & eggs':
+      if (/cheese|cheddar|feta|parmesan|mozzarella|ricotta|cottage/.test(f.name.toLowerCase())) return 'cheese';
+      if (/yog/.test(id)) return 'yogurt';
+      if (/milk/.test(id)) return 'milk';
+      if (/cream/.test(id)) return 'cream';
+      return null; // eggs: no like-for-like swap
+    case 'Drinks': return /milk/.test(id) ? 'milk' : null;
+    case 'Vegetables': return 'veg';
+    case 'Fruit': return 'fruit';
+    case 'Beans, pulses & tofu': return /tofu|tempeh/.test(id) ? 'soy-protein' : id === 'hummus' ? null : 'pulses';
+    case 'Pasta, rice & grains': case 'Potatoes': return 'starch';
+    case 'Bread & cereals':
+      if (/bread|wrap|pitta|bagel|muffin|naan/.test(id)) return 'bread';
+      if (/ryvita|rice-cake/.test(id)) return 'cracker';
+      return 'cereal';
+    case 'Nuts & seeds': return 'nuts';
+    default: return null;
+  }
+}
+
+// Cook-sensible stand-ins, best first. Foods not listed fall back to the
+// nutritionally closest food of the same kind.
+const SUBS = {
+  'pepper-red': 'pepper-green courgette carrot-raw sweetcorn', 'pepper-green': 'pepper-red courgette',
+  mushrooms: 'courgette spinach-raw broccoli', courgette: 'pepper-red broccoli green-beans', aubergine: 'courgette mushrooms pepper-red',
+  avocado: 'hummus cucumber', tomato: 'cucumber pepper-red', 'tomatoes-tin': 'passata', passata: 'tomatoes-tin',
+  onion: 'leek spring-onion', leek: 'onion', 'spinach-raw': 'kale rocket lettuce-romaine', 'spinach-cooked': 'kale broccoli', kale: 'spinach-raw',
+  broccoli: 'green-beans peas-frozen mangetout', 'green-beans': 'broccoli mangetout', mangetout: 'green-beans broccoli', 'peas-frozen': 'sweetcorn green-beans',
+  sweetcorn: 'peas-frozen', 'carrot-raw': 'cucumber pepper-red', 'carrot-boiled': 'butternut peas-frozen', beetroot: 'carrot-raw', cucumber: 'lettuce-romaine celery',
+  celery: 'cucumber carrot-raw', rocket: 'spinach-raw lettuce-romaine', 'lettuce-romaine': 'lettuce-iceberg spinach-raw', 'lettuce-iceberg': 'lettuce-romaine',
+  butternut: 'sweet-potato-baked carrot-boiled', cauliflower: 'broccoli',
+  'salmon-cooked': 'trout-cooked mackerel-cooked cod-cooked chicken-breast-cooked', 'salmon-raw': 'trout-cooked cod-cooked chicken-breast-raw',
+  'smoked-salmon': 'ham-sliced trout-cooked', 'tuna-tin': 'chicken-breast-cooked prawns-cooked egg-boiled', 'prawns-cooked': 'chicken-breast-cooked cod-cooked',
+  'cod-cooked': 'haddock-cooked pollock-cooked chicken-breast-cooked', 'haddock-cooked': 'cod-cooked pollock-cooked chicken-breast-cooked',
+  'pollock-cooked': 'cod-cooked haddock-cooked', 'mackerel-cooked': 'salmon-cooked trout-cooked', 'sardines-tin': 'mackerel-cooked tuna-tin',
+  'trout-cooked': 'salmon-cooked cod-cooked', 'chicken-breast-cooked': 'chicken-thigh-cooked turkey-mince-cooked',
+  'chicken-breast-raw': 'turkey-mince-raw pork-tenderloin', 'chicken-thigh-cooked': 'chicken-breast-cooked', 'turkey-mince-raw': 'beef-mince-5-raw chicken-breast-raw',
+  'turkey-mince-cooked': 'beef-mince-10-cooked', 'beef-mince-5-raw': 'turkey-mince-raw', 'beef-mince-10-cooked': 'turkey-mince-cooked',
+  'pork-tenderloin': 'chicken-breast-cooked', 'ham-sliced': 'chicken-breast-cooked', 'bacon-back': 'ham-sliced', 'sausage-pork': 'veggie-sausage',
+  'egg-boiled': 'chicken-breast-cooked', 'lentils-cooked': 'chickpeas-tin black-beans', 'chickpeas-tin': 'butter-beans lentils-cooked',
+  'kidney-beans-tin': 'black-beans butter-beans', 'black-beans': 'kidney-beans-tin butter-beans', 'butter-beans': 'chickpeas-tin kidney-beans-tin',
+  'tofu-firm': 'tempeh chicken-breast-cooked', tempeh: 'tofu-firm', edamame: 'peas-frozen', hummus: 'cream-cheese-light',
+  feta: 'mozzarella-light cheddar-light', cottage: 'yog-greek-0 ricotta', cheddar: 'cheddar-light mozzarella-light', 'cheddar-light': 'mozzarella-light cheddar',
+  ricotta: 'cottage cream-cheese-light', 'cream-cheese-light': 'ricotta cottage', 'mozzarella-light': 'cheddar-light', parmesan: 'cheddar-light',
+  'yog-greek-0': 'yog-natural-low cottage', 'yog-natural-low': 'yog-greek-0', 'milk-semi': 'milk-skimmed soya-milk', 'soya-milk': 'milk-semi almond-milk',
+  banana: 'apple pear', apple: 'pear banana', pear: 'apple', orange: 'satsuma apple', satsuma: 'orange', kiwi: 'orange satsuma', grapes: 'apple',
+  strawberries: 'raspberries blueberries', raspberries: 'strawberries blueberries', blueberries: 'raspberries strawberries', 'frozen-berries': 'strawberries blueberries',
+  mango: 'pineapple peach', pineapple: 'mango', melon: 'watermelon strawberries',
+  'rice-white-cooked': 'rice-brown-cooked couscous-cooked', 'rice-brown-cooked': 'rice-white-cooked quinoa-cooked', 'quinoa-cooked': 'couscous-cooked rice-brown-cooked',
+  'couscous-cooked': 'quinoa-cooked bulgur-cooked', 'pasta-cooked': 'pasta-wholewheat-cooked rice-white-cooked', 'pasta-wholewheat-cooked': 'pasta-cooked rice-brown-cooked',
+  'egg-noodles-cooked': 'rice-noodles-cooked', 'rice-noodles-cooked': 'egg-noodles-cooked', 'barley-cooked': 'rice-brown-cooked',
+  'potato-new-boiled': 'potato-jacket sweet-potato-baked', 'potato-jacket': 'sweet-potato-baked', 'sweet-potato-baked': 'potato-jacket', mash: 'potato-new-boiled',
+  'bread-wholemeal': 'bread-seeded bread-white', 'bread-seeded': 'bread-wholemeal', 'wrap-wholemeal': 'wrap-white pitta-wholemeal', 'wrap-white': 'wrap-wholemeal',
+  'pitta-wholemeal': 'wrap-wholemeal', bagel: 'bread-seeded', 'english-muffin': 'bread-wholemeal',
+  'porridge-oats': 'muesli weetabix', weetabix: 'shredded-wheat', 'shredded-wheat': 'weetabix', granola: 'muesli', muesli: 'granola', cornflakes: 'rice-krispies',
+  walnuts: 'almonds', almonds: 'walnuts cashews', chia: 'flaxseed', flaxseed: 'chia', 'pumpkin-seeds': 'sunflower-seeds',
+};
+
+function findSubstitute(key, foods, banned, disliked, pool) {
+  const f = foods.get(key);
+  const ok = (c) => c && c.id !== key && !disliked.has(c.id) && !(c.tags ?? []).some((t) => banned.has(t));
+  const listed = SUBS[bareId(key)];
+  if (listed) {
+    for (const id of listed.split(' ')) { const c = foods.get(foodKey(id)); if (ok(c)) return c; }
+    return null;
+  }
+  const r = role(f);
+  if (!r) return null;
+  const v = (x) => [(x.n.kcal ?? 0) / 100, (x.n.protein ?? 0) / 10, (x.n.fat ?? 0) / 10, (x.n.carbs ?? 0) / 10];
+  const fv = v(f);
+  let best = null;
+  for (const id of pool) {
+    const c = foods.get(id);
+    if (!ok(c) || role(c) !== r) continue;
+    const cv = v(c);
+    const d = cv.reduce((s, x, i) => s + (x - fv[i]) ** 2, 0) + (c.cat === f.cat ? 0 : 0.5);
+    if (!best || d < best.d) best = { id, d, food: c };
+  }
+  return best?.food ?? null;
+}
+
+const shortName = (name) => name.split(/[,(]/)[0].trim().toLowerCase();
+
+/**
+ * The meal as it can be served with these options: unchanged, adapted
+ * (disliked ingredients swapped or left out, with `swaps` listing
+ * [fromId, toId|null]), or null if it can't be (disliked meal, diet or
+ * allergy, or a main ingredient with no stand-in).
+ */
+export function adaptMeal(meal, foods, options = {}, pool = null) {
+  if (options.dislikedMeals?.includes(meal.id)) return null;
+  const banned = excludedTags(options);
+  for (const t of mealTags(meal, foods)) if (banned.has(t)) return null;
+  const no = new Set((options.dislikedFoods ?? []).map(foodKey));
+  if (!meal.items.some(([id]) => no.has(foodKey(id)))) return meal;
+  pool ??= [...foods.keys()].filter((k) => k.startsWith('uk:'));
+  const total = itemsNutrients(meal.items, foods).kcal;
+  const grams = new Map();
+  const swaps = [];
+  for (const [id, g] of meal.items) {
+    const key = foodKey(id);
+    if (!no.has(key)) { grams.set(key, (grams.get(key) ?? 0) + g); continue; }
+    const f = foods.get(key);
+    const kcal = ((f.n.kcal ?? 0) * g) / 100;
+    const minor = FLAVOUR.has(bareId(key)) || (kcal <= total * 0.22 && g <= 60);
+    const sub = FLAVOUR.has(bareId(key)) ? null : findSubstitute(key, foods, banned, no, pool);
+    if (sub) {
+      // Vegetables and fruit swap gram for gram; others keep the calories.
+      const same = ['veg', 'fruit'].includes(role(f)) || !sub.n.kcal || !f.n.kcal;
+      const g2 = same ? g : clamp((g * f.n.kcal) / sub.n.kcal, g * 0.5, g * 2);
+      grams.set(sub.id, (grams.get(sub.id) ?? 0) + roundGrams(g2));
+      swaps.push([key, sub.id]);
+    } else if (minor) {
+      swaps.push([key, null]);
+    } else {
+      return null;
+    }
+  }
+  if (!grams.size) return null;
+  const notes = swaps.map(([a, b]) => (b ? `${shortName(foods.get(b).name)} instead of ${shortName(foods.get(a).name)}` : `no ${shortName(foods.get(a).name)}`));
+  return {
+    ...meal,
+    items: [...grams.entries()].map(([k, g]) => [bareId(k), g]),
+    name: `${meal.name} (${notes.join('; ')})`,
+    baseName: meal.name,
+    swaps,
+  };
+}
+
+/** Every meal that can be served with these options, adapted where needed. */
+export function usableMeals(meals, foods, options = {}) {
+  const pool = [...mealIngredients(meals)];
+  return meals.map((m) => adaptMeal(m, foods, options, pool)).filter(Boolean);
+}
+
 /** Nutrient totals for a list of [foodId, grams]. Missing values count as 0. */
 export function itemsNutrients(items, foods) {
   const out = Object.fromEntries(NUTRIENT_KEYS.map((k) => [k, 0]));
@@ -111,7 +260,6 @@ export function roundGrams(g) {
   return Math.round(g / 5) * 5;
 }
 
-const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 // Nutrient vectors inside the search are plain number arrays in NUTRIENT_KEYS
 // order, which keeps the exhaustive search fast enough for a phone.
@@ -167,6 +315,7 @@ export function buildMeal(meal, slot, scale, foods) {
     method: meal.method,
     mins: meal.mins,
     scale: Math.round(scale * 100) / 100,
+    ...(meal.swaps ? { baseName: meal.baseName, swaps: meal.swaps.map(([a, b]) => ({ from: foods.get(a).name, to: b ? foods.get(b).name : null })) } : {}),
     items,
     n: itemsNutrients(items.map((i) => [i.foodId, i.grams]), foods),
   };
@@ -182,11 +331,12 @@ export function dayTotals(meals) {
 export function prepareCandidates({ targets, foods, meals, options = {} }) {
   const bySlot = {};
   const score = makeScorer(targets);
+  const usable = usableMeals(meals, foods, options);
   for (const slot of SLOTS) {
     const slotKcal = targets.kcal * SLOT_SHARES[slot];
     const [lo, hi] = SCALE_LIMITS[slot];
-    bySlot[slot] = meals
-      .filter((m) => m.slots.includes(slot) && mealAllowed(m, foods, options))
+    bySlot[slot] = usable
+      .filter((m) => m.slots.includes(slot))
       .map((m) => {
         const base = itemsNutrients(m.items, foods);
         const scale = clamp(slotKcal / base.kcal, lo, hi);
@@ -400,8 +550,8 @@ export function alternativesForSlot({ plan, dayIndex, slot, targets, foods, meal
   for (const d of plan.days) for (const m of d.meals) weekUse.set(m.mealId, (weekUse.get(m.mealId) ?? 0) + 1);
   const [lo, hi] = SCALE_LIMITS[slot];
   const scored = [];
-  for (const meal of meals) {
-    if (!meal.slots.includes(slot) || meal.id === current || sameDay.has(meal.id) || !mealAllowed(meal, foods, options)) continue;
+  for (const meal of usableMeals(meals, foods, options)) {
+    if (!meal.slots.includes(slot) || meal.id === current || sameDay.has(meal.id)) continue;
     const base = itemsNutrients(meal.items, foods);
     const scale = clamp((targets.kcal - others.kcal) / base.kcal, lo, hi);
     const built = buildMeal(meal, slot, scale, foods);
@@ -444,8 +594,9 @@ export function shoppingList(plan, foods) {
  * Returns { plan, changed, replanned }.
  */
 export function cleanPlan({ plan, targets, foods, meals, options = {} }) {
-  const byId = new Map(meals.map((m) => [m.id, m]));
-  const bad = (m) => { const meal = byId.get(m.mealId); return !meal || !mealAllowed(meal, foods, options); };
+  const usable = new Map(usableMeals(meals, foods, options).map((m) => [m.id, m]));
+  const no = new Set((options.dislikedFoods ?? []).map(foodKey));
+  const bad = (m) => !usable.has(m.mealId) || m.items.some((it) => no.has(it.foodId));
   const prepSlots = new Set(Object.keys(plan.prepMeals ?? {}));
   let changed = 0;
   for (const d of plan.days) for (const m of d.meals) if (bad(m)) changed++;
@@ -459,6 +610,16 @@ export function cleanPlan({ plan, targets, foods, meals, options = {} }) {
   plan.days.forEach((d, dayIndex) => {
     for (const m of d.meals) {
       if (!bad(m)) continue;
+      // Keep the meal if it works without the disliked ingredient.
+      const adapted = usable.get(m.mealId);
+      if (adapted) {
+        const others = zeroVec();
+        for (const x of next.days[dayIndex].meals) if (x.slot !== m.slot) addVec(others, x.n);
+        const [lo, hi] = SCALE_LIMITS[m.slot];
+        const scale = clamp((targets.kcal - others.kcal) / itemsNutrients(adapted.items, foods).kcal, lo, hi);
+        next = replaceMeal(next, dayIndex, buildMeal(adapted, m.slot, scale, foods), targets);
+        continue;
+      }
       const [alt] = alternativesForSlot({ plan: next, dayIndex, slot: m.slot, targets, foods, meals, options, limit: 1 });
       if (!alt) throw new Error(`No other ${SLOT_LABELS[m.slot].toLowerCase()} fits these choices. Try removing a dislike.`);
       next = replaceMeal(next, dayIndex, alt, targets);

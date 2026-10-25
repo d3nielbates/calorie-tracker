@@ -163,7 +163,7 @@ export function describeChanges(changes, { foods, meals }) {
   const fname = (id) => foods.get(id.includes(':') ? id : `uk:${id}`)?.name ?? id;
   const mname = (id) => meals.find((m) => m.id === id)?.name ?? id;
   const lines = [];
-  if (changes.dislikeFoods?.length) lines.push(`Won't plan: ${changes.dislikeFoods.map(fname).join(', ')}`);
+  if (changes.dislikeFoods?.length) lines.push(`Swapped out or left out of meals: ${changes.dislikeFoods.map(fname).join(', ')}`);
   if (changes.allowFoods?.length) lines.push(`Allowed again: ${changes.allowFoods.map(fname).join(', ')}`);
   if (changes.dislikeMeals?.length) lines.push(`Meals dropped: ${changes.dislikeMeals.map(mname).join(', ')}`);
   if (changes.allowMeals?.length) lines.push(`Meals allowed again: ${changes.allowMeals.map(mname).join(', ')}`);

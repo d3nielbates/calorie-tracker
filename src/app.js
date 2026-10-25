@@ -5,7 +5,7 @@ import { NUTRIENTS, NUTRIENT_BY_KEY, MICRO_KEYS, nutrientsForGrams, sumNutrients
 import { computeTargets, assessIntake, ACTIVITY_LEVELS, LOSS_RATES, SAFETY } from './targets.js';
 import { MEALS } from './meals.js';
 import {
-  planWeek, alternativesForSlot, replaceMeal, shoppingList, cleanPlan, prepBatches, rankPrepMeals, mealAllowed, mealIngredients,
+  planWeek, alternativesForSlot, replaceMeal, shoppingList, cleanPlan, prepBatches, rankPrepMeals, usableMeals, mealIngredients,
   SLOTS, SLOT_LABELS, DIETS, EXCLUSIONS, PREP_SLOTS,
 } from './planner.js';
 import { costShoppingList, formatPounds, SHOPS, PRICES_AS_OF } from './prices.js';
@@ -508,7 +508,7 @@ const dayName = (i, style = 'long') => parseLocalDate(addDays(S.plan?.startDate 
 
 function prepSelect(slot, o, t) {
   const v = o.prep?.[slot] || false;
-  const allowed = MEALS.filter((m) => m.slots.includes(slot) && mealAllowed(m, foods, o));
+  const allowed = usableMeals(MEALS, foods, o).filter((m) => m.slots.includes(slot));
   const opts = [['', `Different ${slot} each day`], ['auto', `Same ${slot} every day (planner picks)`],
     ...allowed.map((m) => [m.id, `Same every day: ${m.name}${m.keeps >= 2 ? ' (batch-cook)' : ''}`])];
   return `<label for="prep-${slot}">${SLOT_LABELS[slot]}</label><select id="prep-${slot}" name="prep-${slot}">${opts.map(([k, l]) => `<option value="${esc(k)}" ${String(v || '') === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
@@ -526,7 +526,7 @@ function renderPlan() {
     <form id="plan-form"><label for="diet">Diet</label><select id="diet" name="diet">${Object.entries(DIETS).map(([k, d]) => `<option value="${k}" ${o.diet === k ? 'selected' : ''}>${esc(d.label)}</option>`).join('')}</select>
     <label>Leave out (allergies and diets)</label>${EXCLUSIONS.map((e) => `<label class="inline"><input type="checkbox" name="exclude" value="${e.id}" ${o.exclude.includes(e.id) ? 'checked' : ''}> ${esc(e.label)}</label>`).join('')}
     <label>Foods not eaten</label>
-    <div class="chips" id="disliked-chips">${disliked.length ? disliked.map((id) => `<button type="button" class="chip" data-action="undislike-food" data-id="${esc(id)}" aria-label="Allow ${esc(foodName(id))} again">${esc(foodName(id))} ✕</button>`).join('') : '<span class="small muted">None yet. Any meal containing one of these is never planned.</span>'}</div>
+    <div class="chips" id="disliked-chips">${disliked.length ? disliked.map((id) => `<button type="button" class="chip" data-action="undislike-food" data-id="${esc(id)}" aria-label="Allow ${esc(foodName(id))} again">${esc(foodName(id))} ✕</button>`).join('') : '<span class="small muted">None yet. These are swapped for something similar, or left out of meals.</span>'}</div>
     <div class="row"><button type="button" data-action="choose-dislikes">Choose foods…</button></div>
     ${dislikedMeals.length ? `<label>Meals not suggested</label><div class="chips">${dislikedMeals.map((id) => `<button type="button" class="chip" data-action="undislike-meal" data-id="${esc(id)}" aria-label="Suggest ${esc(mealName(id))} again">${esc(mealName(id))} ✕</button>`).join('')}</div>` : ''}
     <h3>Meal prep</h3><p class="small muted">Have the same breakfast or lunch every day, at the same portion, so you buy the same things each week.</p>
@@ -558,7 +558,8 @@ function renderPlan() {
       const dlabel = parseLocalDate(date).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'short' });
       html += `<details class="card day-card" ${i === 0 ? 'open' : ''}><summary class="spread"><strong>${esc(dlabel)}</strong>
         <span class="muted small">${fmt(day.totals.kcal)} kcal · P ${fmt(day.totals.protein)} g · fibre ${fmt(day.totals.fibre)} g</span></summary>
-        ${day.meals.map((m) => `<div class="meal"><div class="spread"><div><span class="badge">${SLOT_LABELS[m.slot]}</span>${p.prepMeals?.[m.slot] === m.mealId ? ' <span class="badge core">Meal prep</span>' : ''} <strong>${esc(m.name)}</strong></div><span class="small muted">${fmt(m.n.kcal)} kcal</span></div>
+        ${day.meals.map((m) => `<div class="meal"><div class="spread"><div><span class="badge">${SLOT_LABELS[m.slot]}</span>${p.prepMeals?.[m.slot] === m.mealId ? ' <span class="badge core">Meal prep</span>' : ''} <strong>${esc(m.baseName ?? m.name)}</strong></div><span class="small muted">${fmt(m.n.kcal)} kcal</span></div>
+          ${m.swaps?.length ? `<div class="small swapnote">Changed for her: ${esc(m.swaps.map((x) => (x.to ? `${x.to} instead of ${x.from}` : `no ${x.from}`)).join('; '))}</div>` : ''}
           <ul>${m.items.map((it) => `<li>${fmt(it.grams)} g ${esc(it.name)}</li>`).join('')}</ul>
           ${m.method ? `<div class="small muted">${esc(m.method)}${m.mins ? ` (${m.mins} min)` : ''}</div>` : ''}
           <div class="row"><button class="link" data-action="swap" data-day="${i}" data-slot="${m.slot}">Swap</button>
@@ -671,7 +672,7 @@ function openDislikes(filter = '') {
     const id = f.id.replace(/^uk:/, '');
     return `${head}<label class="inline"><input type="checkbox" name="food" value="${esc(id)}" ${chosen.has(id) ? 'checked' : ''}> ${esc(f.name)}</label>`;
   }).join('');
-  const body = `<p class="small muted">Tick everything she won't eat. Meals containing any of these are never planned, and meals already in the plan are swapped.</p>
+  const body = `<p class="small muted">Tick everything she won't eat. In each meal it's swapped for something similar (green pepper for red, trout for salmon), or left out if it's only a small part. A meal is only dropped when it can't work without it, like an omelette without eggs.</p>
     <input type="search" id="dislike-filter" placeholder="Filter, e.g. mushroom" value="${esc(filter)}" aria-label="Filter foods">
     <form id="dislike-form"><div id="dislike-list">${list || '<p class="muted">No matching foods.</p>'}</div>
     <div class="row sticky-actions"><button class="primary" type="submit">Save</button><button type="button" data-action="close-sheet">Cancel</button></div></form>`;
@@ -691,7 +692,7 @@ function submitDislikes() {
 function openMealDislike(dayIndex, slot) {
   const m = S.plan.days[dayIndex].meals.find((x) => x.slot === slot);
   openMealDislike.meal = m;
-  openSheet(m.name, `<p>What doesn't she like about it?</p>
+  openSheet(m.baseName ?? m.name, `<p>What doesn't she like about it? It will be swapped for something similar or left out, here and in every other meal.</p>
     <ul class="results">${m.items.map((it) => `<li tabindex="0" data-action="dislike-food" data-id="${esc(it.foodId.replace(/^uk:/, ''))}"><div class="grow">${esc(it.name)}</div><span class="small muted">Never plan this</span></li>`).join('')}</ul>
     <div class="row" style="margin-top:12px"><button class="danger" data-action="dislike-meal" data-id="${esc(m.mealId)}">Never suggest this meal</button><button data-action="close-sheet">Cancel</button></div>`);
 }

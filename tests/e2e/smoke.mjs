@@ -291,6 +291,9 @@ await step('foods she won\'t eat are never planned', async () => {
   await page.waitForTimeout(400);
   const used = await planFoodIds();
   for (const id of ['uk:mushrooms', 'uk:salmon-cooked', 'uk:salmon-raw', 'uk:smoked-salmon']) assert.ok(!used.includes(id), id);
+  // Meals with a disliked ingredient are kept with a swap, and say so.
+  const adapted = await page.evaluate(() => window.__app.state.plan.days.flatMap((d) => d.meals).filter((m) => m.swaps).length);
+  if (adapted) assert.match(await page.locator('main').innerText(), /Changed for her: /);
 });
 
 await step('"won\'t eat this" removes an ingredient from the whole plan', async () => {
@@ -334,7 +337,7 @@ await step('coach understands what she won\'t eat and updates the plan', async (
   await page.getByRole('button', { name: 'Send' }).click();
   await page.waitForSelector('.bubble.coach');
   const txt = await page.locator('#coach').innerText();
-  assert.match(txt, /Won't plan: .*Tuna/);
+  assert.match(txt, /Swapped out or left out of meals: .*Tuna/);
   const disliked = await page.evaluate(() => window.__app.state.planOptions.dislikedFoods);
   assert.ok(disliked.includes('tuna-tin') && disliked.includes('feta'));
   const used = await planFoodIds();

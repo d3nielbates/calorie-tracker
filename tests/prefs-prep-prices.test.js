@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MEALS } from '../src/meals.js';
-import { planWeek, alternativesForSlot, cleanPlan, prepBatches, rankPrepMeals, shoppingList, mealIngredients, itemsNutrients } from '../src/planner.js';
+import { planWeek, alternativesForSlot, cleanPlan, usableMeals, prepBatches, rankPrepMeals, shoppingList, mealIngredients, itemsNutrients } from '../src/planner.js';
 import { PRICES, SHOPS, priceFor, costShoppingList } from '../src/prices.js';
 import { buildVocab, localCoach, applyCoachChanges, parseCoachReply, coachPrompt, describeChanges } from '../src/coach.js';
 import { validateState, emptyState } from '../src/store.js';
@@ -45,6 +45,45 @@ test('a long list of dislikes still gives a full, on-target week', () => {
   for (const id of disliked) assert.ok(!used.has(`uk:${id}`), id);
 });
 
+test('one disliked ingredient is swapped or left out instead of dropping the meal', () => {
+  const disliked = ['mushrooms', 'pepper-red', 'salmon-cooked', 'salmon-raw', 'feta', 'avocado', 'tuna-tin', 'chilli'];
+  const options = { dislikedFoods: disliked };
+  const usable = usableMeals(MEALS, foods, options);
+  assert.ok(usable.length >= MEALS.length - 2, `${usable.length} of ${MEALS.length} meals kept`);
+  const byId = new Map(usable.map((m) => [m.id, m]));
+  const items = (id) => Object.fromEntries(byId.get(id).items);
+  assert.ok(items('d-bolognese').courgette > 0 && !items('d-bolognese').mushrooms); // courgette for mushrooms
+  assert.ok(items('d-salmon-potatoes')['trout-cooked'] > 0);
+  assert.ok(items('l-chickpea-feta')['mozzarella-light'] > 0);
+  assert.ok(!items('l-prawn-noodle-pot').chilli && byId.get('l-prawn-noodle-pot').swaps.some(([a, b]) => a === 'uk:chilli' && b === null));
+  assert.match(byId.get('d-bolognese').name, /courgette instead of mushrooms/);
+  for (const m of usable) for (const [id] of m.items) assert.ok(!disliked.includes(id), `${m.id} still has ${id}`);
+  // Swaps never break a diet or allergy choice.
+  const veg = usableMeals(MEALS, foods, { diet: 'vegetarian', exclude: ['dairy'], dislikedFoods: ['tofu-firm', 'feta'] });
+  for (const m of veg) for (const [id] of m.items) {
+    const tags = foods.get(`uk:${id}`).tags;
+    assert.ok(!tags.some((t) => ['meat', 'fish', 'shellfish', 'dairy'].includes(t)), `${m.id}: ${id}`);
+  }
+  // An egg dish without eggs isn't offered.
+  assert.ok(!usableMeals(MEALS, foods, { dislikedFoods: ['egg'] }).some((m) => m.id === 'b-veg-omelette'));
+  // Planned meals show what changed.
+  const p = plan(options);
+  const changed = p.days.flatMap((d) => d.meals).filter((m) => m.swaps);
+  assert.ok(changed.length > 0);
+  for (const m of changed) assert.ok(m.baseName && m.swaps.every((x) => x.from));
+});
+
+test('cleanPlan keeps a meal when it can just swap the ingredient', () => {
+  const p = plan({ prep: { breakfast: false, lunch: false } });
+  const day = p.days.findIndex((d) => d.meals.some((m) => m.items.some((i) => i.foodId === 'uk:onion')));
+  assert.ok(day >= 0);
+  const res = cleanPlan({ plan: p, targets, foods, meals: MEALS, options: { dislikedFoods: ['onion'] } });
+  const before = p.days[day].meals.map((m) => m.mealId);
+  assert.deepEqual(res.plan.days[day].meals.map((m) => m.mealId), before);
+  assert.ok(!usedFoods(res.plan).has('uk:onion'));
+  assert.ok(Math.abs(res.plan.days[day].totals.kcal - targets.kcal) / targets.kcal < 0.06);
+});
+
 test('cleanPlan swaps only the meals that contain a new dislike', () => {
   const p = plan();
   const hit = p.days[0].meals[2].items[0].foodId.slice(3); // an ingredient of day 1's dinner
@@ -81,13 +120,19 @@ test('meal prep: a chosen meal is kept; a now-disliked one is replaced', () => {
   assert.equal(p.prepMeals.breakfast, 'b-overnight-oats');
   assert.ok(!p.prepMeals.lunch);
   assert.ok(p.days.every((d) => d.meals[0].mealId === 'b-overnight-oats'));
+  // A disliked ingredient is swapped, so the chosen prep meal is kept.
   const q = plan({ prep: { breakfast: 'b-overnight-oats' }, dislikedFoods: ['apple'] });
-  assert.notEqual(q.prepMeals.breakfast, 'b-overnight-oats');
-  assert.ok(q.days.every((d) => d.meals[0].mealId === q.prepMeals.breakfast));
+  assert.equal(q.prepMeals.breakfast, 'b-overnight-oats');
+  assert.ok(q.days.every((d) => d.meals[0].items.some((i) => i.foodId === 'uk:pear') && !d.meals[0].items.some((i) => i.foodId === 'uk:apple')));
+  // A meal that can't work without the ingredient is replaced, still the same every day.
+  const r = plan({ prep: { breakfast: 'b-scrambled-toast' }, dislikedFoods: ['egg'] });
+  assert.notEqual(r.prepMeals.breakfast, 'b-scrambled-toast');
+  assert.ok(r.days.every((d) => d.meals[0].mealId === r.prepMeals.breakfast));
   // cleanPlan re-plans when the prep meal is hit, keeping prep consistent.
   const res = cleanPlan({ plan: p, targets, foods, meals: MEALS, options: { prep: { breakfast: 'b-overnight-oats' }, dislikedFoods: ['apple'] } });
   assert.equal(res.replanned, true);
-  assert.ok(res.plan.days.every((d) => d.meals[0].mealId === res.plan.prepMeals.breakfast));
+  assert.ok(res.plan.days.every((d) => d.meals[0].mealId === 'b-overnight-oats'));
+  assert.equal(new Set(res.plan.days.map((d) => JSON.stringify(d.meals[0].items))).size, 1);
 });
 
 test('meal prep options are ranked and respect dislikes', () => {
@@ -187,7 +232,7 @@ test('coach changes apply to options and can be undone', () => {
   assert.deepEqual(o.dislikedFoods, ['mushrooms']);
   assert.deepEqual(o.dislikedMeals, []);
   assert.equal(o.prep.lunch, false);
-  assert.deepEqual(describeChanges({ dislikeFoods: ['mushrooms'] }, { foods, meals: MEALS }), ["Won't plan: Mushrooms, raw"]);
+  assert.deepEqual(describeChanges({ dislikeFoods: ['mushrooms'] }, { foods, meals: MEALS }), ["Swapped out or left out of meals: Mushrooms, raw"]);
 });
 
 test('AI coach answers are validated against real ids', () => {
