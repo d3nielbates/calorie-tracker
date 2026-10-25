@@ -16,7 +16,7 @@ import { unpackDatabase, mergeFoods } from './fooddb.js';
 import { progressSummary } from './trend.js';
 import {
   loadState, saveState, exportState, importState, emptyState, makeEntry, addEntry, updateEntry, removeEntry,
-  setWeight, removeWeight, currentWeight, makeCustomFood,
+  setWeight, removeWeight, currentWeight, makeCustomFood, validateState,
 } from './store.js';
 import { changedDocIds, stamp, mergeRemote, createCloudSync, dayDocId } from './cloud.js';
 import { localDateStr, addDays, parseLocalDate, formatWeight, kgToStLb, stLbToKg, cmToFtIn, ftInToCm } from './units.js';
@@ -1006,7 +1006,7 @@ async function connectCloud() {
     $('#status').textContent = 'Syncing…';
     const remote = await sync.loadAll();
     const { state, push } = mergeRemote(S, remote);
-    S = state;
+    S = validateState(state); // documents saved by an older version get new defaults
     saveState(storage ?? memoryStorage, S);
     cloud = sync;
     if (push.length) cloud.queue(push, 0);
